@@ -1,0 +1,61 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+terraform-provider-openobserve
+
+# Test binary
+*.test
+
+# Go build artifacts
+*.out
+vendor/
+
+# Go workspace
+go.work
+go.work.sum
+
+# GoReleaser
+dist/
+
+# Terraform
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfplan
+*.tfstate
+*.tfstate.backup
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Sensitive variable files
+*.tfvars
+!*.tfvars.example
+
+# Credentials & secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+kubeconfig
+*kubeconfig*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug
+debug
+debug.test
