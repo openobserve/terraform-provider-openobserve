@@ -125,17 +125,31 @@ func (r *UserResource) Create(ctx context.Context, req resource.CreateRequest, r
 		Password:  data.Password.ValueString(),
 	}
 
-	created, err := r.client.CreateUser(ctx, data.OrgID.ValueString(), apiReq)
-	if err != nil {
+	if _, err := r.client.CreateUser(ctx, data.OrgID.ValueString(), apiReq); err != nil {
 		resp.Diagnostics.AddError("Error creating user", err.Error())
 		return
 	}
 
 	data.ID = types.StringValue(fmt.Sprintf("%s/%s", data.OrgID.ValueString(), data.Email.ValueString()))
-	data.FirstName = types.StringValue(created.FirstName)
-	data.LastName = types.StringValue(created.LastName)
-	data.Role = types.StringValue(created.Role)
-	data.IsExternal = types.BoolValue(created.IsExternal)
+
+	// Create returns only {"code":200,"message":"..."} — re-read to get actual state.
+	user, err := r.client.GetUser(ctx, data.OrgID.ValueString(), data.Email.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError("Error reading user after create", err.Error())
+		return
+	}
+	if user != nil {
+		if user.FirstName != "" {
+			data.FirstName = types.StringValue(user.FirstName)
+		}
+		if user.LastName != "" {
+			data.LastName = types.StringValue(user.LastName)
+		}
+		if user.Role != "" {
+			data.Role = types.StringValue(user.Role)
+		}
+		data.IsExternal = types.BoolValue(user.IsExternal)
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -182,16 +196,28 @@ func (r *UserResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		apiReq.Password = data.Password.ValueString()
 	}
 
-	updated, err := r.client.UpdateUser(ctx, data.OrgID.ValueString(), data.Email.ValueString(), apiReq)
-	if err != nil {
+	if _, err := r.client.UpdateUser(ctx, data.OrgID.ValueString(), data.Email.ValueString(), apiReq); err != nil {
 		resp.Diagnostics.AddError("Error updating user", err.Error())
 		return
 	}
 
-	data.FirstName = types.StringValue(updated.FirstName)
-	data.LastName = types.StringValue(updated.LastName)
-	data.Role = types.StringValue(updated.Role)
-	data.IsExternal = types.BoolValue(updated.IsExternal)
+	user, err := r.client.GetUser(ctx, data.OrgID.ValueString(), data.Email.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError("Error reading user after update", err.Error())
+		return
+	}
+	if user != nil {
+		if user.FirstName != "" {
+			data.FirstName = types.StringValue(user.FirstName)
+		}
+		if user.LastName != "" {
+			data.LastName = types.StringValue(user.LastName)
+		}
+		if user.Role != "" {
+			data.Role = types.StringValue(user.Role)
+		}
+		data.IsExternal = types.BoolValue(user.IsExternal)
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
