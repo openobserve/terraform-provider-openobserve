@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-08-15
+
+Packaging and licensing corrections. No provider behaviour changed; the
+resource and data source schemas are identical to `1.0.0`.
+
+### Fixed
+
+- **The repository was not recognised as Apache-2.0 licensed.** `LICENSE` held a
+  modified copy of the Apache-2.0 text, differing from the canonical wording on
+  135 lines — the definitions of "Work" and "Contribution" had been rewritten,
+  along with clauses in the patent-litigation and liability sections. GitHub
+  therefore classified the repository as `NOASSERTION`, and the OpenTofu
+  registry refused to serve the provider's documentation with *451 Unavailable
+  for Legal Reasons*. `LICENSE` is now the verbatim Apache-2.0 text, and the
+  copyright notice that had been edited into it moved to `NOTICE`.
+- **The Terraform Registry recorded the wrong plugin protocol.** The Registry
+  reads supported protocol versions from a `..._manifest.json` release asset
+  that was never published, so it fell back to its default of protocol 5.0 for
+  every released version, while this provider is built on
+  terraform-plugin-framework and speaks only 6.0. Terraform 1.x negotiates the
+  real protocol during the plugin handshake, so installs were unaffected;
+  Terraform 0.12 through 0.15 would have been told the provider was compatible
+  and then failed to launch it. The manifest now ships with each release.
+- **Releases would have started failing without warning.** `.goreleaser.yml`
+  used `archives.format`, removed in GoReleaser v2, while the release workflow
+  tracks the latest v2.
+- **The documentation check could never agree with the command it recommended.**
+  CI ran a bare `tfplugindocs generate` while `make docs` passes
+  `--provider-name`; without that flag the provider name is derived from the
+  checkout directory, which differs between CI and a local clone. Both now go
+  through `make docs`.
+
 ## [1.0.0] — 2026-08-14
 
 First release with a stability commitment. The `0.0.x` line was a preview: three
@@ -109,5 +141,6 @@ a stream or dashboard onto the new schema without touching the server.
 - Comprehensive examples for all resources and data sources
 - Apache 2.0 license
 
+[1.0.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.0.1
 [1.0.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.0.0
 [0.0.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v0.0.1
