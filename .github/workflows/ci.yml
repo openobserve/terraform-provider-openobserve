@@ -72,8 +72,12 @@ jobs:
       - name: Install tfplugindocs
         run: go install github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs@latest
 
+      # Generated through the Makefile so this check and `make docs` cannot
+      # disagree. Invoking tfplugindocs directly makes the provider name depend
+      # on the checkout directory name, which differs between CI and a local
+      # clone and silently produces a different page_title.
       - name: Generate docs
-        run: tfplugindocs generate
+        run: make docs
 
       - name: Check for uncommitted docs changes
         run: |
