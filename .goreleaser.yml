@@ -53,6 +53,12 @@ signs:
 
 release:
   draft: false
+  extra_files:
+    # The Terraform Registry reads the declared protocol version from this
+    # file. Without it the Registry falls back to protocol 5.0, which
+    # misreports a plugin-framework provider that only speaks 6.0.
+    - glob: terraform-registry-manifest.json
+      name_template: "{{ .ProjectName }}_{{ .Version }}_manifest.json"
 
 changelog:
   use: github
