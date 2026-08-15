@@ -1,9 +1,12 @@
-data "openobserve_stream" "default_logs" {
-  org_id      = "default"
-  name        = "default"
+data "openobserve_stream" "app_logs" {
+  name        = "app_logs"
   stream_type = "logs"
 }
 
-output "default_logs_retention" {
-  value = data.openobserve_stream.default_logs.settings.data_retention
+output "app_log_fields" {
+  value = [for f in data.openobserve_stream.app_logs.schema : f.name]
+}
+
+output "app_log_retention_days" {
+  value = data.openobserve_stream.app_logs.data_retention
 }

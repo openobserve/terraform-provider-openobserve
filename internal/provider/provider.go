@@ -107,16 +107,45 @@ func (p *OpenObserveProvider) Configure(ctx context.Context, req provider.Config
 
 func (p *OpenObserveProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
+		NewOrganizationResource,
 		NewStreamResource,
+		NewFolderResource,
 		NewDashboardResource,
 		NewUserResource,
+		NewServiceAccountResource,
+		NewRoleResource,
+		NewGroupResource,
+		NewAlertTemplateResource,
+		NewAlertDestinationResource,
+		NewAlertResource,
 	}
 }
 
 func (p *OpenObserveProvider) DataSources(_ context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{
-		NewStreamDataSource,
 		NewOrganizationDataSource,
+		NewOrganizationsDataSource,
+		NewStreamDataSource,
+		NewStreamsDataSource,
+		NewUserDataSource,
+		NewUsersDataSource,
+		NewUserRolesDataSource,
+		NewServiceAccountsDataSource,
+		NewRoleDataSource,
+		NewRolesDataSource,
+		NewGroupDataSource,
+		NewGroupsDataSource,
+		NewResourcesDataSource,
+		NewFolderDataSource,
+		NewFoldersDataSource,
+		NewDashboardDataSource,
+		NewDashboardsDataSource,
+		NewAlertTemplateDataSource,
+		NewAlertTemplatesDataSource,
+		NewAlertDestinationDataSource,
+		NewAlertDestinationsDataSource,
+		NewAlertDataSource,
+		NewAlertsDataSource,
 	}
 }
 

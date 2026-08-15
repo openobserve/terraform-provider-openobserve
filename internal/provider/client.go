@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -27,9 +29,14 @@ func newClient(baseURL, username, password, orgID string) *Client {
 		password: password,
 		orgID:    orgID,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 60 * time.Second,
 		},
 	}
+}
+
+// DefaultOrgID returns the provider-level organization identifier.
+func (c *Client) DefaultOrgID() string {
+	return c.orgID
 }
 
 // apiError is returned when the API responds with a non-2xx status.
@@ -40,6 +47,52 @@ type apiError struct {
 
 func (e *apiError) Error() string {
 	return fmt.Sprintf("OpenObserve API error (HTTP %d): %s", e.StatusCode, e.Body)
+}
+
+// isNotFound reports whether err is an API error carrying HTTP 404.
+func isNotFound(err error) bool {
+	var apiErr *apiError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusNotFound
+	}
+	return false
+}
+
+// isAlreadyExists reports whether err is a 4xx complaining the object exists.
+// OpenObserve returns HTTP 400 with a "already exists" message rather than 409.
+func isAlreadyExists(err error) bool {
+	var apiErr *apiError
+	if errors.As(err, &apiErr) {
+		if apiErr.StatusCode == http.StatusConflict {
+			return true
+		}
+		return apiErr.StatusCode == http.StatusBadRequest &&
+			strings.Contains(strings.ToLower(apiErr.Body), "already exists")
+	}
+	return false
+}
+
+// isNotSupported reports whether err is the 403 OpenObserve returns for an
+// endpoint that only exists in the Enterprise edition.
+func isNotSupported(err error) bool {
+	var apiErr *apiError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusForbidden &&
+			strings.Contains(apiErr.Body, "Not Supported")
+	}
+	return false
+}
+
+// enterpriseFeatureError turns the bare "Not Supported" 403 into a diagnostic
+// that says what is actually missing.
+func enterpriseFeatureError(feature string, err error) (string, string) {
+	if isNotSupported(err) {
+		return feature + " requires OpenObserve Enterprise",
+			"The server answered 403 Not Supported. " + feature + " is an Enterprise feature and also needs " +
+				"OpenFGA enabled (ZO_OPENFGA_ENABLED=true). This provider resource cannot be used against an " +
+				"open-source deployment."
+	}
+	return "Error managing " + feature, err.Error()
 }
 
 func (c *Client) doRequest(ctx context.Context, method, path string, body any) ([]byte, int, error) {
@@ -67,7 +120,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any) (
 	if err != nil {
 		return nil, 0, fmt.Errorf("executing request %s %s: %w", method, path, err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // response body close error is not actionable
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -81,147 +134,45 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any) (
 	return respBody, resp.StatusCode, nil
 }
 
-// ---------------------------------------------------------------------------
-// Stream API
-// ---------------------------------------------------------------------------
-
-// StreamSettingsAPI is the wire format for stream settings.
-type StreamSettingsAPI struct {
-	DataRetention      int                  `json:"data_retention,omitempty"`
-	PartitionKeys      []StreamPartitionKey `json:"partition_keys,omitempty"`
-	FullTextSearchKeys []string             `json:"full_text_search_keys,omitempty"`
-	IndexFields        []string             `json:"index_fields,omitempty"`
-	BloomFilterFields  []string             `json:"bloom_filter_fields,omitempty"`
-}
-
-// StreamPartitionKey represents a single partition key configuration.
-type StreamPartitionKey struct {
-	Field string   `json:"field"`
-	Types []string `json:"types"`
-}
-
-// StreamSchemaResponse is returned by GET /api/{org}/streams/{name}/schema.
-type StreamSchemaResponse struct {
-	Name        string            `json:"name"`
-	StorageType string            `json:"storage_type"`
-	StreamType  string            `json:"stream_type"`
-	Settings    StreamSettingsAPI `json:"settings"`
-}
-
-func (c *Client) GetStreamSchema(ctx context.Context, orgID, streamType, name string) (*StreamSchemaResponse, error) {
-	path := fmt.Sprintf("/api/%s/streams/%s/schema?type=%s", orgID, name, streamType)
-	body, statusCode, err := c.doRequest(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		if apiErr, ok := err.(*apiError); ok && apiErr.StatusCode == http.StatusNotFound {
-			return nil, nil // caller interprets nil as "does not exist"
-		}
-		return nil, err
-	}
-	if statusCode == http.StatusNotFound {
-		return nil, nil
-	}
-
-	var result StreamSchemaResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("parsing stream schema response: %w", err)
-	}
-	return &result, nil
-}
-
-func (c *Client) UpdateStreamSettings(ctx context.Context, orgID, streamType, name string, settings StreamSettingsAPI) error {
-	path := fmt.Sprintf("/api/%s/streams/%s/settings?type=%s", orgID, name, streamType)
-	_, _, err := c.doRequest(ctx, http.MethodPut, path, settings)
+// do issues a request and discards the response body.
+func (c *Client) do(ctx context.Context, method, path string, body any) error {
+	_, _, err := c.doRequest(ctx, method, path, body)
 	return err
 }
 
-func (c *Client) DeleteStream(ctx context.Context, orgID, streamType, name string) error {
-	path := fmt.Sprintf("/api/%s/streams/%s?type=%s", orgID, name, streamType)
-	_, statusCode, err := c.doRequest(ctx, http.MethodDelete, path, nil)
+// doJSON issues a request and decodes a JSON response into out.
+func (c *Client) doJSON(ctx context.Context, method, path string, body, out any) error {
+	respBody, _, err := c.doRequest(ctx, method, path, body)
 	if err != nil {
-		if apiErr, ok := err.(*apiError); ok && apiErr.StatusCode == http.StatusNotFound {
-			return nil // already gone
-		}
 		return err
 	}
-	_ = statusCode
+	if out == nil {
+		return nil
+	}
+	if len(bytes.TrimSpace(respBody)) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(respBody, out); err != nil {
+		return fmt.Errorf("parsing response from %s %s: %w (body: %s)", method, path, err, truncate(string(respBody), 512))
+	}
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// Dashboard API
-// ---------------------------------------------------------------------------
-
-// DashboardAPI is the wire format for create/update dashboard requests.
-type DashboardAPI struct {
-	DashboardID string `json:"dashboardId,omitempty"`
-	Title       string `json:"title"`
-	Description string `json:"description,omitempty"`
-	Role        string `json:"role,omitempty"`
-	Owner       string `json:"owner,omitempty"`
-	Panels      any    `json:"panels,omitempty"`
-	Variables   any    `json:"variables,omitempty"`
-}
-
-// DashboardResponse is returned by create/get dashboard endpoints.
-type DashboardResponse struct {
-	DashboardID string `json:"dashboardId"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Role        string `json:"role"`
-	Owner       string `json:"owner"`
-	Version     int    `json:"version"`
-}
-
-func (c *Client) CreateDashboard(ctx context.Context, orgID string, req DashboardAPI) (*DashboardResponse, error) {
-	path := fmt.Sprintf("/api/%s/dashboards", orgID)
-	body, _, err := c.doRequest(ctx, http.MethodPost, path, req)
-	if err != nil {
-		return nil, err
-	}
-	var result DashboardResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("parsing dashboard create response: %w", err)
-	}
-	return &result, nil
-}
-
-func (c *Client) GetDashboard(ctx context.Context, orgID, dashboardID string) (*DashboardResponse, error) {
-	path := fmt.Sprintf("/api/%s/dashboards/%s", orgID, dashboardID)
-	body, statusCode, err := c.doRequest(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		if apiErr, ok := err.(*apiError); ok && apiErr.StatusCode == http.StatusNotFound {
-			return nil, nil
+// doJSONOptional behaves like doJSON but maps HTTP 404 to (false, nil).
+func (c *Client) doJSONOptional(ctx context.Context, method, path string, body, out any) (bool, error) {
+	if err := c.doJSON(ctx, method, path, body, out); err != nil {
+		if isNotFound(err) {
+			return false, nil
 		}
-		return nil, err
+		return false, err
 	}
-	if statusCode == http.StatusNotFound {
-		return nil, nil
-	}
-	var result DashboardResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("parsing dashboard get response: %w", err)
-	}
-	return &result, nil
+	return true, nil
 }
 
-func (c *Client) UpdateDashboard(ctx context.Context, orgID, dashboardID string, req DashboardAPI) (*DashboardResponse, error) {
-	path := fmt.Sprintf("/api/%s/dashboards/%s", orgID, dashboardID)
-	body, _, err := c.doRequest(ctx, http.MethodPut, path, req)
-	if err != nil {
-		return nil, err
-	}
-	var result DashboardResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("parsing dashboard update response: %w", err)
-	}
-	return &result, nil
-}
-
-func (c *Client) DeleteDashboard(ctx context.Context, orgID, dashboardID string) error {
-	path := fmt.Sprintf("/api/%s/dashboards/%s", orgID, dashboardID)
-	_, _, err := c.doRequest(ctx, http.MethodDelete, path, nil)
-	if err != nil {
-		if apiErr, ok := err.(*apiError); ok && apiErr.StatusCode == http.StatusNotFound {
+// deleteIgnoreMissing issues a DELETE and swallows a 404 so deletes are idempotent.
+func (c *Client) deleteIgnoreMissing(ctx context.Context, path string) error {
+	if err := c.do(ctx, http.MethodDelete, path, nil); err != nil {
+		if isNotFound(err) {
 			return nil
 		}
 		return err
@@ -229,127 +180,23 @@ func (c *Client) DeleteDashboard(ctx context.Context, orgID, dashboardID string)
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// User API
-// ---------------------------------------------------------------------------
-
-// UserAPI is the wire format for create/update user requests.
-type UserAPI struct {
-	Email     string `json:"email"`
-	FirstName string `json:"first_name,omitempty"`
-	LastName  string `json:"last_name,omitempty"`
-	Password  string `json:"password,omitempty"`
-	Role      string `json:"role"`
+// pathEscape escapes a single URL path segment.
+func pathEscape(s string) string {
+	return url.PathEscape(s)
 }
 
-// UserResponse is returned by create/get user endpoints.
-type UserResponse struct {
-	Email      string `json:"email"`
-	FirstName  string `json:"first_name"`
-	LastName   string `json:"last_name"`
-	Role       string `json:"role"`
-	IsExternal bool   `json:"is_external"`
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
-// UsersResponse wraps the users list response.
-type UsersResponse struct {
-	Data []UserResponse `json:"data"`
-}
-
-func (c *Client) CreateUser(ctx context.Context, orgID string, req UserAPI) (*UserResponse, error) {
-	path := fmt.Sprintf("/api/%s/users", orgID)
-	body, _, err := c.doRequest(ctx, http.MethodPost, path, req)
-	if err != nil {
-		return nil, err
-	}
-	var result UserResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("parsing user create response: %w", err)
-	}
-	return &result, nil
-}
-
-func (c *Client) GetUser(ctx context.Context, orgID, email string) (*UserResponse, error) {
-	path := fmt.Sprintf("/api/%s/users", orgID)
-	body, _, err := c.doRequest(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-	var result UsersResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("parsing users list response: %w", err)
-	}
-	for _, u := range result.Data {
-		if u.Email == email {
-			return &u, nil
-		}
-	}
-	return nil, nil // not found
-}
-
-func (c *Client) UpdateUser(ctx context.Context, orgID, email string, req UserAPI) (*UserResponse, error) {
-	path := fmt.Sprintf("/api/%s/users/%s", orgID, email)
-	body, _, err := c.doRequest(ctx, http.MethodPut, path, req)
-	if err != nil {
-		return nil, err
-	}
-	var result UserResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("parsing user update response: %w", err)
-	}
-	return &result, nil
-}
-
-func (c *Client) DeleteUser(ctx context.Context, orgID, email string) error {
-	path := fmt.Sprintf("/api/%s/users/%s", orgID, email)
-	_, _, err := c.doRequest(ctx, http.MethodDelete, path, nil)
-	if err != nil {
-		if apiErr, ok := err.(*apiError); ok && apiErr.StatusCode == http.StatusNotFound {
-			return nil
-		}
-		return err
-	}
-	return nil
-}
-
-// ---------------------------------------------------------------------------
-// Organization API
-// ---------------------------------------------------------------------------
-
-// OrganizationAPI represents a single organization from the API.
-type OrganizationAPI struct {
-	Identifier string `json:"identifier"`
-	Name       string `json:"name"`
-	Type       int    `json:"org_type"`
-	UserEmail  string `json:"user_email"`
-}
-
-// OrganizationsResponse wraps the org list endpoint.
-type OrganizationsResponse struct {
-	Data []OrganizationAPI `json:"data"`
-}
-
-func (c *Client) ListOrganizations(ctx context.Context) ([]OrganizationAPI, error) {
-	body, _, err := c.doRequest(ctx, http.MethodGet, "/api/organizations", nil)
-	if err != nil {
-		return nil, err
-	}
-	var result OrganizationsResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("parsing organizations response: %w", err)
-	}
-	return result.Data, nil
-}
-
-func (c *Client) GetOrganization(ctx context.Context, identifier string) (*OrganizationAPI, error) {
-	orgs, err := c.ListOrganizations(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, o := range orgs {
-		if o.Identifier == identifier {
-			return &o, nil
-		}
-	}
-	return nil, nil
+// MessageResponse is the generic {code, message, id, name} envelope OpenObserve
+// returns from many write endpoints.
+type MessageResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	ID      string `json:"id,omitempty"`
+	Name    string `json:"name,omitempty"`
 }
