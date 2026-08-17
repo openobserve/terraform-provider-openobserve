@@ -127,9 +127,9 @@ Full reference and guides are on the
 [Terraform Registry](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs):
 
 - [Getting started](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/getting-started)
-- [Alerting](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/alerting) — every query type, warning thresholds, simple vs multi-alerts
-- [Service level objectives](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/slos) — indicators, error budgets, burn-rate alerts
-- [Dashboards](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/dashboards) — panel JSON without the guesswork
+- [Alerting](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/alerting): every query type, warning thresholds, simple vs multi-alerts
+- [Service level objectives](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/slos): indicators, error budgets, burn-rate alerts
+- [Dashboards](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/dashboards): panel JSON without the guesswork
 - [Roles and groups](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/rbac)
 
 ## Import
@@ -194,4 +194,4 @@ and `PASSPHRASE` secrets configured in GitHub Actions.
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE).
