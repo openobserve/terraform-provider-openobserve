@@ -377,3 +377,17 @@ func reconcileStringSet(ctx context.Context, configured types.Set, server []stri
 	}
 	return configured
 }
+
+// boolPreserveNull maps a server boolean back onto an optional attribute
+// without inventing a value the configuration never set.
+//
+// Terraform requires the value applied to an Optional attribute to match the
+// configuration exactly, so writing `false` where the user wrote nothing is an
+// inconsistent-result error. A server `false` against an unset attribute is
+// therefore left null; anything else is reported, so real drift still shows.
+func boolPreserveNull(configured types.Bool, server bool) types.Bool {
+	if !server && configured.IsNull() {
+		return types.BoolNull()
+	}
+	return types.BoolValue(server)
+}

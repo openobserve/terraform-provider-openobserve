@@ -113,3 +113,58 @@ resource "openobserve_alert" "cpu_saturation" {
     threshold = 1
   }
 }
+
+# An SLO alert reads a precomputed objective rather than running a query, so it
+# costs nothing to evaluate and fires on the same numbers the SLO page shows.
+resource "openobserve_alert" "budget_burned" {
+  name         = "checkout-budget-burned"
+  stream_type  = "logs"
+  stream_name  = openobserve_stream.app_logs.name
+  destinations = [openobserve_alert_destination.slack.name]
+
+  query_condition {
+    type = "slo"
+
+    slo_condition {
+      slo_id   = openobserve_slo.checkout_availability.slo_id
+      kind     = "error_budget"
+      operator = ">"
+      critical = 90 # 90% of the budget consumed
+      warning  = 75
+    }
+  }
+
+  # No threshold or operator here: an SLO alert has no count gate, and the
+  # server rejects one rather than ignoring it.
+  trigger_condition {
+    period    = 5
+    frequency = 5
+  }
+}
+
+# Burn rate fires on how fast the budget is being spent. Both windows are
+# required, and the short one must be at least twice the SLO's slice interval.
+resource "openobserve_alert" "burning_fast" {
+  name         = "checkout-burning-fast"
+  stream_type  = "logs"
+  stream_name  = openobserve_stream.app_logs.name
+  destinations = [openobserve_alert_destination.pagerduty.name]
+
+  query_condition {
+    type = "slo"
+
+    slo_condition {
+      slo_id            = openobserve_slo.checkout_availability.slo_id
+      kind              = "burn_rate"
+      operator          = ">"
+      critical          = 14.4 # burns a 30-day budget in about two days
+      long_window_secs  = 3600
+      short_window_secs = 900
+    }
+  }
+
+  trigger_condition {
+    period    = 5
+    frequency = 5
+  }
+}

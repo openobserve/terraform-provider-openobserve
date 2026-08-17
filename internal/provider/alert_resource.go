@@ -60,10 +60,14 @@ type AlertResourceModel struct {
 	Template          types.String                `tfsdk:"template"`
 	ContextAttributes types.Map                   `tfsdk:"context_attributes"`
 	RowTemplate       types.String                `tfsdk:"row_template"`
+	RowTemplateType   types.String                `tfsdk:"row_template_type"`
 	TZOffset          types.Int64                 `tfsdk:"tz_offset"`
 	Owner             types.String                `tfsdk:"owner"`
 	Priority          types.Int64                 `tfsdk:"priority"`
 	Tags              types.Set                   `tfsdk:"tags"`
+	CreatesIncident   types.Bool                  `tfsdk:"creates_incident"`
+	Workflows         types.Set                   `tfsdk:"workflows"`
+	Deduplication     *AlertDeduplicationModel    `tfsdk:"deduplication"`
 	QueryCondition    *AlertQueryConditionModel   `tfsdk:"query_condition"`
 	TriggerCondition  *AlertTriggerConditionModel `tfsdk:"trigger_condition"`
 	LastTriggeredAt   types.Int64                 `tfsdk:"last_triggered_at"`
@@ -74,15 +78,37 @@ type AlertResourceModel struct {
 
 // AlertQueryConditionModel is the query_condition block.
 type AlertQueryConditionModel struct {
-	QueryType       types.String           `tfsdk:"type"`
-	SQL             types.String           `tfsdk:"sql"`
-	PromQL          types.String           `tfsdk:"promql"`
-	PromQLCondition *AlertConditionModel   `tfsdk:"promql_condition"`
-	Conditions      types.String           `tfsdk:"conditions"`
-	Aggregation     *AlertAggregationModel `tfsdk:"aggregation"`
-	VRLFunction     types.String           `tfsdk:"vrl_function"`
-	SearchEventType types.String           `tfsdk:"search_event_type"`
-	MultiTimeRange  []AlertTimeOffsetModel `tfsdk:"multi_time_range"`
+	QueryType          types.String            `tfsdk:"type"`
+	SQL                types.String            `tfsdk:"sql"`
+	PromQL             types.String            `tfsdk:"promql"`
+	PromQLCondition    *AlertConditionModel    `tfsdk:"promql_condition"`
+	PromQLWarningValue types.Float64           `tfsdk:"promql_warning_value"`
+	PromQLMultiAlert   types.Bool              `tfsdk:"promql_multi_alert"`
+	Conditions         types.String            `tfsdk:"conditions"`
+	Aggregation        *AlertAggregationModel  `tfsdk:"aggregation"`
+	SloCondition       *AlertSloConditionModel `tfsdk:"slo_condition"`
+	VRLFunction        types.String            `tfsdk:"vrl_function"`
+	SearchEventType    types.String            `tfsdk:"search_event_type"`
+	MultiTimeRange     []AlertTimeOffsetModel  `tfsdk:"multi_time_range"`
+}
+
+// AlertSloConditionModel is the slo_condition block of an SLO alert.
+type AlertSloConditionModel struct {
+	SloID           types.String  `tfsdk:"slo_id"`
+	Kind            types.String  `tfsdk:"kind"`
+	Operator        types.String  `tfsdk:"operator"`
+	Critical        types.Float64 `tfsdk:"critical"`
+	Warning         types.Float64 `tfsdk:"warning"`
+	LongWindowSecs  types.Int64   `tfsdk:"long_window_secs"`
+	ShortWindowSecs types.Int64   `tfsdk:"short_window_secs"`
+	MultiAlert      types.Bool    `tfsdk:"multi_alert"`
+}
+
+// AlertDeduplicationModel is the deduplication block.
+type AlertDeduplicationModel struct {
+	Enabled           types.Bool  `tfsdk:"enabled"`
+	FingerprintFields types.Set   `tfsdk:"fingerprint_fields"`
+	TimeWindowMinutes types.Int64 `tfsdk:"time_window_minutes"`
 }
 
 // AlertConditionModel is a single column/operator/value comparison.
@@ -235,6 +261,24 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Default:     stringdefault.StaticString(""),
 				Description: "Template applied to each matched row when rendering `{rows}` in the message.",
 			},
+			"row_template_type": schema.StringAttribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     stringdefault.StaticString("String"),
+				Description: "How `row_template` is rendered: `String` (default) or `Json`.",
+				Validators:  []validator.String{stringvalidator.OneOf("String", "Json")},
+			},
+			"creates_incident": schema.BoolAttribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+				Description: "Route firings through the incident system instead of sending direct notifications.",
+			},
+			"workflows": schema.SetAttribute{
+				Optional:    true,
+				ElementType: types.StringType,
+				Description: "Workflow IDs to trigger when the alert fires.",
+			},
 			"tz_offset": schema.Int64Attribute{
 				Optional:    true,
 				Computed:    true,
@@ -277,11 +321,12 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Description: "What the alert evaluates.",
 				Attributes: map[string]schema.Attribute{
 					"type": schema.StringAttribute{
-						Optional:    true,
-						Computed:    true,
-						Default:     stringdefault.StaticString("custom"),
-						Description: "Query style: `custom` (UI-style conditions, default), `sql`, or `promql`.",
-						Validators:  []validator.String{stringvalidator.OneOf("custom", "sql", "promql")},
+						Optional: true,
+						Computed: true,
+						Default:  stringdefault.StaticString("custom"),
+						Description: "Query style: `custom` (UI-style conditions, default), `sql`, `promql`, or " +
+							"`slo` (reads a precomputed SLO's status instead of running a query).",
+						Validators: []validator.String{stringvalidator.OneOf("custom", "sql", "promql", "slo")},
 					},
 					"sql": schema.StringAttribute{
 						Optional:    true,
@@ -290,6 +335,17 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"promql": schema.StringAttribute{
 						Optional:    true,
 						Description: "PromQL expression. Required when `type` is `promql`.",
+					},
+					"promql_warning_value": schema.Float64Attribute{
+						Optional: true,
+						Description: "Warning-level value for the PromQL comparison, sharing the operator of " +
+							"`promql_condition`. Omit for a single-level alert.",
+					},
+					"promql_multi_alert": schema.BoolAttribute{
+						Optional: true,
+						Description: "Evaluate and notify per returned series rather than collapsing the query to " +
+							"one verdict. The group key is the series' full label set, chosen by the expression's " +
+							"own `by (…)` clause. This is PromQL's counterpart to `aggregation.multi_alert`.",
 					},
 					"conditions": schema.StringAttribute{
 						Optional: true,
@@ -340,6 +396,56 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 							},
 						},
 					},
+					"slo_condition": schema.SingleNestedBlock{
+						Description: "What to watch on an SLO. Required when `type` is `slo`.\n\n" +
+							"An SLO alert reads a precomputed objective rather than running its own query, so it " +
+							"costs nothing to evaluate and fires on the same numbers the SLO page shows.",
+						Attributes: map[string]schema.Attribute{
+							"slo_id": schema.StringAttribute{
+								Optional:    true,
+								Description: "Objective to watch, as produced by `openobserve_slo.slo_id`.",
+							},
+							"kind": schema.StringAttribute{
+								Optional: true,
+								Description: "What the threshold applies to: `error_budget` (percentage of the " +
+									"budget consumed over the window) or `burn_rate` (multiples of the " +
+									"budget-neutral rate, evaluated in two windows).",
+								Validators: []validator.String{stringvalidator.OneOf("error_budget", "burn_rate")},
+							},
+							"operator": schema.StringAttribute{
+								Optional: true,
+								Description: "Comparison against the thresholds. Ascending only — `>` or `>=` — " +
+									"because both budget consumption and burn rate are bad when high.",
+								Validators: []validator.String{stringvalidator.OneOf(">", ">=")},
+							},
+							"critical": schema.Float64Attribute{
+								Optional:    true,
+								Description: "Critical threshold. Must be finite and strictly positive.",
+							},
+							"warning": schema.Float64Attribute{
+								Optional:    true,
+								Description: "Warning threshold, sharing `operator` with the critical one. Omit for a single-level alert.",
+							},
+							"long_window_secs": schema.Int64Attribute{
+								Optional: true,
+								Description: "`burn_rate` only. The long evaluation window: 1h to 48h, no longer " +
+									"than the SLO window, and an exact multiple of at least twice the slice interval.",
+							},
+							"short_window_secs": schema.Int64Attribute{
+								Optional: true,
+								Description: "`burn_rate` only, and required alongside `long_window_secs`. A " +
+									"twelfth of the long window is the conventional choice, following the " +
+									"Google SRE workbook, but it must also be at least twice the SLO's slice " +
+									"interval: a one-slice window has coverage 0 or 1, so a single gap would " +
+									"freeze the alert.",
+							},
+							"multi_alert": schema.BoolAttribute{
+								Optional: true,
+								Description: "Evaluate and notify per SLO group rather than on the objective as a " +
+									"whole. Requires a grouped SLO.",
+							},
+						},
+					},
 					"multi_time_range": schema.ListNestedBlock{
 						Description: "Historical windows to compare the current window against.",
 						NestedObject: schema.NestedBlockObject{
@@ -353,6 +459,26 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					},
 				},
 			},
+			"deduplication": schema.SingleNestedBlock{
+				Description: "Collapse repeated firings of the same underlying issue into one notification.",
+				Attributes: map[string]schema.Attribute{
+					"enabled": schema.BoolAttribute{
+						Optional:    true,
+						Description: "Whether deduplication is applied.",
+					},
+					"fingerprint_fields": schema.SetAttribute{
+						Optional:    true,
+						ElementType: types.StringType,
+						Description: "Fields from the query result that identify one issue. Left empty, the server " +
+							"infers them from the query: the condition fields for `custom`, the GROUP BY columns " +
+							"for `sql`, and the label dimensions for `promql`.",
+					},
+					"time_window_minutes": schema.Int64Attribute{
+						Optional:    true,
+						Description: "How long a fingerprint stays suppressed. Defaults to twice the alert frequency.",
+					},
+				},
+			},
 			"trigger_condition": schema.SingleNestedBlock{
 				Description: "When and how often the alert is evaluated, and what counts as firing.",
 				Attributes: map[string]schema.Attribute{
@@ -363,17 +489,19 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 						Description: "Lookback window in minutes that each evaluation queries.",
 					},
 					"operator": schema.StringAttribute{
-						Optional:    true,
-						Computed:    true,
-						Default:     stringdefault.StaticString(">="),
-						Description: "Operator comparing the result to `threshold`.",
-						Validators:  []validator.String{stringvalidator.OneOf(comparisonOperators...)},
+						Optional: true,
+						Computed: true,
+						Description: "Operator comparing the result to `threshold`. Defaults to `>=`.\n\n" +
+							"Leave unset on an SLO alert: that family has no count gate, and its comparison " +
+							"lives on `query_condition.slo_condition.operator`.",
+						Validators: []validator.String{stringvalidator.OneOf(comparisonOperators...)},
 					},
 					"threshold": schema.Int64Attribute{
-						Optional:    true,
-						Computed:    true,
-						Default:     int64default.StaticInt64(1),
-						Description: "Critical threshold the result is compared against.",
+						Optional: true,
+						Computed: true,
+						Description: "Critical threshold the result is compared against. Defaults to `1`.\n\n" +
+							"Leave unset on an SLO alert: that family has no count gate, and its threshold " +
+							"lives on `query_condition.slo_condition.critical`.",
 					},
 					"warning_threshold": schema.Int64Attribute{
 						Optional: true,
@@ -458,6 +586,76 @@ func (r *AlertResource) ValidateConfig(ctx context.Context, req resource.Validat
 				path.Root("query_condition").AtName("promql"),
 				"Missing promql",
 				"`promql` is required when `query_condition.type` is `promql`.",
+			)
+		}
+	case "slo":
+		if config.QueryCondition.SloCondition == nil {
+			resp.Diagnostics.AddAttributeError(
+				path.Root("query_condition").AtName("slo_condition"),
+				"Missing slo_condition",
+				"`slo_condition` is required when `query_condition.type` is `slo`.",
+			)
+			break
+		}
+		// The trigger threshold is a count gate for every other family. An SLO
+		// alert has none, so setting one means the author expected a behaviour
+		// they will not get.
+		if config.TriggerCondition != nil {
+			if !config.TriggerCondition.Threshold.IsNull() {
+				resp.Diagnostics.AddAttributeError(
+					path.Root("trigger_condition").AtName("threshold"),
+					"SLO alerts have no count gate",
+					"An SLO alert is thresholded by `query_condition.slo_condition.critical`, not by "+
+						"`trigger_condition.threshold`. Remove the threshold.",
+				)
+			}
+			if !config.TriggerCondition.Operator.IsNull() {
+				resp.Diagnostics.AddAttributeError(
+					path.Root("trigger_condition").AtName("operator"),
+					"SLO alerts have no count gate",
+					"An SLO alert is compared by `query_condition.slo_condition.operator`, not by "+
+						"`trigger_condition.operator`. Remove the operator.",
+				)
+			}
+		}
+
+		// The two windows only exist for burn-rate alerts; setting them on a
+		// budget alert means the author expected a behaviour they will not get.
+		if config.QueryCondition.SloCondition.Kind.ValueString() == "error_budget" &&
+			(!config.QueryCondition.SloCondition.LongWindowSecs.IsNull() ||
+				!config.QueryCondition.SloCondition.ShortWindowSecs.IsNull()) {
+			resp.Diagnostics.AddAttributeError(
+				path.Root("query_condition").AtName("slo_condition"),
+				"Windows apply only to burn-rate alerts",
+				"`long_window_secs` and `short_window_secs` are only meaningful when `kind` is `burn_rate`. "+
+					"An `error_budget` alert measures over the SLO's own window.",
+			)
+		}
+	}
+
+	if config.QueryCondition.Aggregation != nil && config.TriggerCondition != nil &&
+		!config.TriggerCondition.WarningThreshold.IsNull() {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("trigger_condition").AtName("warning_threshold"),
+			"warning_threshold is not supported on aggregation alerts",
+			"On an aggregation alert the count threshold is coverage, not severity. Set the warning level "+
+				"with `query_condition.aggregation.warning_value` instead.",
+		)
+	}
+
+	if sc := config.QueryCondition.SloCondition; sc != nil && sc.Kind.ValueString() == "burn_rate" {
+		// Both windows are required. The provider deliberately does not derive
+		// the short one: the minimum is two slice intervals, and the slice
+		// interval belongs to the SLO, so any value guessed here could be
+		// rejected.
+		if sc.LongWindowSecs.IsNull() || sc.ShortWindowSecs.IsNull() {
+			resp.Diagnostics.AddAttributeError(
+				path.Root("query_condition").AtName("slo_condition"),
+				"Burn-rate alerts need both windows",
+				"Set `long_window_secs` and `short_window_secs`. A twelfth of the long window is the "+
+					"conventional starting point, but the short window must also be at least twice the "+
+					"SLO's slice interval — a one-slice window has coverage 0 or 1, so a single gap would "+
+					"freeze the alert.",
 			)
 		}
 	}
@@ -656,21 +854,24 @@ func (r *AlertResource) alertFromModel(ctx context.Context, model *AlertResource
 	}
 
 	alert := AlertAPI{
-		Name:         model.Name.ValueString(),
-		OrgID:        org,
-		StreamType:   model.StreamType.ValueString(),
-		StreamName:   model.StreamName.ValueString(),
-		IsRealTime:   model.IsRealTime.ValueBool(),
-		Destinations: destinations,
-		Template:     optString(model.Template),
-		ContextAttrs: stringsFromMap(ctx, model.ContextAttributes, diags),
-		RowTemplate:  model.RowTemplate.ValueString(),
-		Description:  model.Description.ValueString(),
-		Enabled:      model.Enabled.ValueBool(),
-		TZOffset:     int32(model.TZOffset.ValueInt64()),
-		Owner:        optString(model.Owner),
-		Priority:     optInt64(model.Priority),
-		Tags:         stringsFromSet(ctx, model.Tags, diags),
+		Name:            model.Name.ValueString(),
+		OrgID:           org,
+		StreamType:      model.StreamType.ValueString(),
+		StreamName:      model.StreamName.ValueString(),
+		IsRealTime:      model.IsRealTime.ValueBool(),
+		Destinations:    destinations,
+		Template:        optString(model.Template),
+		ContextAttrs:    stringsFromMap(ctx, model.ContextAttributes, diags),
+		RowTemplate:     model.RowTemplate.ValueString(),
+		RowTemplateType: model.RowTemplateType.ValueString(),
+		CreatesIncident: model.CreatesIncident.ValueBool(),
+		Workflows:       stringsFromSet(ctx, model.Workflows, diags),
+		Description:     model.Description.ValueString(),
+		Enabled:         model.Enabled.ValueBool(),
+		TZOffset:        int32(model.TZOffset.ValueInt64()),
+		Owner:           optString(model.Owner),
+		Priority:        optInt64(model.Priority),
+		Tags:            stringsFromSet(ctx, model.Tags, diags),
 	}
 	if folderID != "" {
 		alert.FolderID = &folderID
@@ -682,16 +883,45 @@ func (r *AlertResource) alertFromModel(ctx context.Context, model *AlertResource
 	if model.TriggerCondition != nil {
 		alert.TriggerCondition = triggerConditionFromModel(model.TriggerCondition)
 	}
+	// The count gate's defaults depend on the family. Every other family gates
+	// on "at least one result"; an SLO alert has no gate at all, and the server
+	// rejects a non-default threshold rather than ignoring it.
+	if model.TriggerCondition != nil {
+		isSlo := alert.QueryCondition.QueryType == "slo"
+		if model.TriggerCondition.Operator.IsNull() || model.TriggerCondition.Operator.IsUnknown() {
+			if isSlo {
+				alert.TriggerCondition.Operator = "="
+			} else {
+				alert.TriggerCondition.Operator = ">="
+			}
+		}
+		if model.TriggerCondition.Threshold.IsNull() || model.TriggerCondition.Threshold.IsUnknown() {
+			if isSlo {
+				alert.TriggerCondition.Threshold = 0
+			} else {
+				alert.TriggerCondition.Threshold = 1
+			}
+		}
+	}
+	if model.Deduplication != nil {
+		alert.Deduplication = &AlertDeduplicationAPI{
+			Enabled:           model.Deduplication.Enabled.ValueBool(),
+			FingerprintFields: stringsFromSet(ctx, model.Deduplication.FingerprintFields, diags),
+			TimeWindowMinutes: optInt64(model.Deduplication.TimeWindowMinutes),
+		}
+	}
 	return alert
 }
 
 func queryConditionFromModel(ctx context.Context, model *AlertQueryConditionModel, diags *diag.Diagnostics) AlertQueryConditionAPI {
 	out := AlertQueryConditionAPI{
-		QueryType:       model.QueryType.ValueString(),
-		SQL:             optString(model.SQL),
-		PromQL:          optString(model.PromQL),
-		VRLFunction:     optString(model.VRLFunction),
-		SearchEventType: optString(model.SearchEventType),
+		QueryType:          model.QueryType.ValueString(),
+		SQL:                optString(model.SQL),
+		PromQL:             optString(model.PromQL),
+		PromQLWarningValue: optFloat64(model.PromQLWarningValue),
+		PromQLMultiAlert:   model.PromQLMultiAlert.ValueBool(),
+		VRLFunction:        optString(model.VRLFunction),
+		SearchEventType:    optString(model.SearchEventType),
 	}
 	if out.QueryType == "" {
 		out.QueryType = "custom"
@@ -714,6 +944,19 @@ func queryConditionFromModel(ctx context.Context, model *AlertQueryConditionMode
 			aggregation.Having = conditionFromModel(model.Aggregation.Having, diags)
 		}
 		out.Aggregation = aggregation
+	}
+
+	if model.SloCondition != nil && !model.SloCondition.SloID.IsNull() {
+		out.SloCondition = &AlertSloConditionAPI{
+			SloID:           model.SloCondition.SloID.ValueString(),
+			Kind:            model.SloCondition.Kind.ValueString(),
+			Operator:        model.SloCondition.Operator.ValueString(),
+			Critical:        model.SloCondition.Critical.ValueFloat64(),
+			Warning:         optFloat64(model.SloCondition.Warning),
+			LongWindowSecs:  optInt64(model.SloCondition.LongWindowSecs),
+			ShortWindowSecs: optInt64(model.SloCondition.ShortWindowSecs),
+			MultiAlert:      model.SloCondition.MultiAlert.ValueBool(),
+		}
 	}
 
 	for _, tr := range model.MultiTimeRange {
@@ -822,6 +1065,26 @@ func (r *AlertResource) applyAlertToModel(ctx context.Context, alert *AlertAPI, 
 	model.Enabled = types.BoolValue(alert.Enabled)
 	model.Description = types.StringValue(alert.Description)
 	model.RowTemplate = types.StringValue(alert.RowTemplate)
+	model.CreatesIncident = types.BoolValue(alert.CreatesIncident)
+	if alert.RowTemplateType != "" {
+		model.RowTemplateType = types.StringValue(alert.RowTemplateType)
+	}
+	if len(alert.Workflows) == 0 {
+		model.Workflows = types.SetNull(types.StringType)
+	} else {
+		model.Workflows = setFromStrings(ctx, alert.Workflows, diags)
+	}
+	if alert.Deduplication != nil {
+		model.Deduplication = &AlertDeduplicationModel{
+			Enabled:           types.BoolValue(alert.Deduplication.Enabled),
+			TimeWindowMinutes: int64FromPtr(alert.Deduplication.TimeWindowMinutes),
+		}
+		if len(alert.Deduplication.FingerprintFields) == 0 {
+			model.Deduplication.FingerprintFields = types.SetNull(types.StringType)
+		} else {
+			model.Deduplication.FingerprintFields = setFromStrings(ctx, alert.Deduplication.FingerprintFields, diags)
+		}
+	}
 	model.TZOffset = types.Int64Value(int64(alert.TZOffset))
 	model.Template = stringFromPtr(alert.Template)
 	model.Owner = stringFromPtr(alert.Owner)
@@ -839,7 +1102,7 @@ func (r *AlertResource) applyAlertToModel(ctx context.Context, alert *AlertAPI, 
 		model.Tags = setFromStrings(ctx, alert.Tags, diags)
 	}
 
-	model.QueryCondition = queryConditionToModel(ctx, &alert.QueryCondition, diags)
+	model.QueryCondition = queryConditionToModel(ctx, &alert.QueryCondition, model.QueryCondition, diags)
 	model.TriggerCondition = triggerConditionToModel(&alert.TriggerCondition)
 
 	if alert.FolderID != nil && *alert.FolderID != "" {
@@ -847,14 +1110,42 @@ func (r *AlertResource) applyAlertToModel(ctx context.Context, alert *AlertAPI, 
 	}
 }
 
-func queryConditionToModel(ctx context.Context, api *AlertQueryConditionAPI, diags *diag.Diagnostics) *AlertQueryConditionModel {
+func queryConditionToModel(ctx context.Context, api *AlertQueryConditionAPI, prior *AlertQueryConditionModel, diags *diag.Diagnostics) *AlertQueryConditionModel {
+	// Optional booleans are only reported when the server says true, or when
+	// the configuration already set them; see boolPreserveNull.
+	var priorPromQLMultiAlert, priorAggMultiAlert, priorSloMultiAlert types.Bool
+	if prior != nil {
+		priorPromQLMultiAlert = prior.PromQLMultiAlert
+		if prior.Aggregation != nil {
+			priorAggMultiAlert = prior.Aggregation.MultiAlert
+		}
+		if prior.SloCondition != nil {
+			priorSloMultiAlert = prior.SloCondition.MultiAlert
+		}
+	}
+
 	out := &AlertQueryConditionModel{
-		QueryType:       types.StringValue(api.QueryType),
-		SQL:             stringFromPtr(api.SQL),
-		PromQL:          stringFromPtr(api.PromQL),
-		Conditions:      jsonStringValue(api.Conditions, diags),
-		VRLFunction:     stringFromPtr(api.VRLFunction),
-		SearchEventType: stringFromPtr(api.SearchEventType),
+		QueryType:          types.StringValue(api.QueryType),
+		SQL:                stringFromPtr(api.SQL),
+		PromQL:             stringFromPtr(api.PromQL),
+		PromQLWarningValue: float64FromPtr(api.PromQLWarningValue),
+		PromQLMultiAlert:   boolPreserveNull(priorPromQLMultiAlert, api.PromQLMultiAlert),
+		Conditions:         jsonStringValue(api.Conditions, diags),
+		VRLFunction:        stringFromPtr(api.VRLFunction),
+		SearchEventType:    stringFromPtr(api.SearchEventType),
+	}
+
+	if api.SloCondition != nil {
+		out.SloCondition = &AlertSloConditionModel{
+			SloID:           types.StringValue(api.SloCondition.SloID),
+			Kind:            types.StringValue(api.SloCondition.Kind),
+			Operator:        types.StringValue(api.SloCondition.Operator),
+			Critical:        types.Float64Value(api.SloCondition.Critical),
+			Warning:         float64FromPtr(api.SloCondition.Warning),
+			LongWindowSecs:  int64FromPtr(api.SloCondition.LongWindowSecs),
+			ShortWindowSecs: int64FromPtr(api.SloCondition.ShortWindowSecs),
+			MultiAlert:      boolPreserveNull(priorSloMultiAlert, api.SloCondition.MultiAlert),
+		}
 	}
 
 	if api.PromQLCondition != nil {
@@ -870,7 +1161,7 @@ func queryConditionToModel(ctx context.Context, api *AlertQueryConditionAPI, dia
 			GroupBy:      listFromStrings(ctx, api.Aggregation.GroupBy, diags),
 			Function:     types.StringValue(api.Aggregation.Function),
 			WarningValue: float64FromPtr(api.Aggregation.WarningValue),
-			MultiAlert:   types.BoolValue(api.Aggregation.MultiAlert),
+			MultiAlert:   boolPreserveNull(priorAggMultiAlert, api.Aggregation.MultiAlert),
 			Having: &AlertConditionModel{
 				Column:   types.StringValue(api.Aggregation.Having.Column),
 				Operator: types.StringValue(api.Aggregation.Having.Operator),

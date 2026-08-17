@@ -4,7 +4,7 @@
 [![Registry](https://img.shields.io/badge/Terraform_Registry-openobserve%2Fopenobserve-623CE4?logo=terraform)](https://registry.terraform.io/providers/openobserve/openobserve/latest)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Manage [OpenObserve](https://openobserve.ai) with Terraform: organizations, streams, dashboards, alerting, and IAM.
+Manage [OpenObserve](https://openobserve.ai) with Terraform: organizations, streams, dashboards, alerting, service level objectives, and IAM.
 
 ## Requirements
 
@@ -21,7 +21,7 @@ terraform {
   required_providers {
     openobserve = {
       source  = "openobserve/openobserve"
-      version = "~> 1.0"
+      version = "~> 1.1"
     }
   }
 }
@@ -95,7 +95,8 @@ export OPENOBSERVE_ORG_ID="default"
 | `openobserve_group` †             | User groups and the roles they grant                                     |
 | `openobserve_alert_template`      | Notification message templates                                           |
 | `openobserve_alert_destination`   | Webhook, email, and SNS destinations                                     |
-| `openobserve_alert`               | Scheduled and real-time alerts (SQL, PromQL, and aggregation)            |
+| `openobserve_alert`               | Scheduled and real-time alerts (SQL, PromQL, aggregation, and SLO)      |
+| `openobserve_slo`                 | Service level objectives, with error budgets and burn-rate alerting     |
 
 ## Data Sources
 
@@ -114,9 +115,22 @@ export OPENOBSERVE_ORG_ID="default"
 | `openobserve_alert_template(s)`    | One template (including prebuilt ones), or a listing |
 | `openobserve_alert_destination(s)` | One destination, or a listing                        |
 | `openobserve_alert(s)`             | One alert by ID or name, or a listing                |
+| `openobserve_slo(s)`               | One objective with its measurement, or a listing     |
 
 † Requires OpenObserve Enterprise with OpenFGA enabled. Against an open-source
 deployment these return a diagnostic saying so rather than an opaque HTTP 403.
+Everything else, including SLOs, works on both editions.
+
+## Documentation
+
+Full reference and guides are on the
+[Terraform Registry](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs):
+
+- [Getting started](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/getting-started)
+- [Alerting](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/alerting) — every query type, warning thresholds, simple vs multi-alerts
+- [Service level objectives](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/slos) — indicators, error budgets, burn-rate alerts
+- [Dashboards](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/dashboards) — panel JSON without the guesswork
+- [Roles and groups](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/rbac)
 
 ## Import
 
@@ -134,6 +148,7 @@ terraform import openobserve_group.example             default/sre
 terraform import openobserve_alert_template.example    default/slack
 terraform import openobserve_alert_destination.example default/pagerduty
 terraform import openobserve_alert.example             default/2fXkZ8QlmNbYcV1pR3sT
+terraform import openobserve_slo.example               default/2fXkZ8QlmNbYcV1pR3sT
 ```
 
 A service account's API token is only ever returned when the account is created

@@ -135,6 +135,7 @@ func TestExpectedResourcesAreRegistered(t *testing.T) {
 		"openobserve_organization",
 		"openobserve_role",
 		"openobserve_service_account",
+		"openobserve_slo",
 		"openobserve_stream",
 		"openobserve_user",
 	}
@@ -177,6 +178,8 @@ func TestExpectedDataSourcesAreRegistered(t *testing.T) {
 		"openobserve_role",
 		"openobserve_roles",
 		"openobserve_service_accounts",
+		"openobserve_slo",
+		"openobserve_slos",
 		"openobserve_stream",
 		"openobserve_streams",
 		"openobserve_user",

@@ -1,0 +1,254 @@
+---
+page_title: "Service level objectives"
+subcategory: "Guides"
+description: |-
+  Indicators, error budgets, coverage, and alerting on burn rate.
+---
+
+# Service level objectives
+
+An SLO measures a service level indicator over a rolling window and compares it
+against a target. The window is divided into slices, each slice contributes a
+good/total pair, and the objective is the ratio across the window.
+
+```hcl
+resource "openobserve_slo" "checkout_availability" {
+  name = "checkout_availability"
+
+  target              = 99.9    # three nines
+  window_secs         = 2592000 # 30 days
+  slice_interval_secs = 300     # 5 minutes
+
+  count_sli {
+    single_query {
+      stream      = "app_logs"
+      stream_type = "logs"
+      scope       = "service = 'checkout'"
+      good_expr   = "status < 500"
+    }
+  }
+}
+```
+
+SLOs live in **alert folders** — there is no separate SLO folder type — so
+`folder_id` refers to an `openobserve_folder` with `folder_type = "alerts"`.
+
+## Choosing an indicator
+
+Exactly one indicator block is required. They answer different questions.
+
+### `count_sli` — good events over total events
+
+The natural choice for availability. Three sources, in descending order of
+preference:
+
+**`single_query`** counts both numerator and denominator in one scan, so they are
+provably drawn from the same rows. Use this unless you cannot.
+
+```hcl
+count_sli {
+  single_query {
+    stream      = "app_logs"
+    stream_type = "logs"
+    scope       = "service = 'checkout'" # denominator filter; omit for all rows
+    good_expr   = "status < 500"         # numerator predicate
+  }
+}
+```
+
+**`promql`** exists because pre-aggregated counters have no rows for a
+`good_expr` to classify — "good" only exists as arithmetic between series. Use a
+range selector equal to the slice interval, since the evaluator samples at slice
+ends:
+
+```hcl
+count_sli {
+  promql {
+    good  = "sum(increase(http_requests_total{status!~\"5..\"}[5m]))"
+    total = "sum(increase(http_requests_total[5m]))"
+  }
+}
+```
+
+**`dual_query`** runs separate good and total queries. Weaker: two scans that
+cannot be proven to have seen the same instant. It exists for imported
+definitions that cannot be folded into one query. Each query projects
+`slice_start`, every `group_by` column, and exactly one numeric `zo_slo_value`.
+
+### `time_slice_sli` — each slice is good or bad
+
+The natural choice for latency, where you care whether a percentile stayed under
+a bound rather than counting individual events:
+
+```hcl
+time_slice_sli {
+  stream         = "app_logs"
+  stream_type    = "logs"
+  query_language = "sql"
+  query          = "SELECT approx_percentile_cont(duration_ms, 0.95) AS zo_slo_value FROM \"app_logs\""
+  comparator     = "<"
+  threshold      = 300
+}
+```
+
+Only orderable comparators (`>`, `>=`, `<`, `<=`) are accepted. A slice with no
+value is a *gap*, not a failure, so equality has no meaning here.
+
+`absent_is_bad` flips that for freshness objectives, where a silent pipeline is a
+broken pipeline:
+
+```hcl
+time_slice_sli {
+  # …
+  absent_is_bad = true
+}
+```
+
+It only changes the meaning of a *successful* query's empty result. A failed
+query still writes nothing and coverage falls, so a search outage freezes the
+objective rather than firing it. Ungrouped objectives only — gap fill cannot see
+a group missing from an entire pass, so a grouped freshness objective would
+freeze instead of firing for exactly the failure it watches for. The provider
+rejects that combination during `plan`.
+
+### `alert_sli` — derived from an alert
+
+Slices where the alert was firing count as bad:
+
+```hcl
+alert_sli {
+  alert_id = openobserve_alert.high_error_rate.alert_id
+}
+```
+
+## Grouping
+
+`group_by` splits an objective into independent per-group measurements. Each
+group gets its own budget:
+
+```hcl
+resource "openobserve_slo" "by_region" {
+  name     = "checkout_availability_by_region"
+  group_by = ["region"]
+  # …
+}
+```
+
+Grouping is defined once, on the objective, and every alert on it inherits those
+groups. There is no second place to configure it.
+
+## Reading the measurement
+
+The data sources expose the current numbers:
+
+```hcl
+data "openobserve_slo" "checkout" {
+  name = "checkout_availability"
+}
+
+output "budget_remaining_pct" {
+  value = data.openobserve_slo.checkout.status.error_budget_remaining
+}
+```
+
+`status` is null until the first evaluation pass has run. "Not yet measured" and
+"measured as zero" are different answers, and the provider does not conflate
+them — a brand-new objective is not 0% available.
+
+Two fields are worth understanding:
+
+**`coverage`** is the fraction of the window actually measured, from 0 to 1.
+
+**`no_data`** is true when coverage falls below the floor. The objective is then
+**frozen** — neither healthy nor breached — and every derived figure is null.
+That is a third state, and a dashboard that renders it as "0% available" is
+lying. Check it explicitly:
+
+```hcl
+output "frozen" {
+  value = [for s in data.openobserve_slos.all.slos : s.name if s.status != null && s.status.no_data]
+}
+```
+
+**`error_budget_remaining`** is a percentage, and goes negative once the budget
+is overspent. That is deliberate and not clamped: after burning 180% of the
+budget, `-80%` is the number you need to see.
+
+## Alerting on an objective
+
+An SLO alert reads the precomputed objective rather than running a query, so it
+costs nothing to evaluate and fires on the same numbers the SLO page shows.
+
+**Error budget** fires on how much of the budget the window has consumed:
+
+```hcl
+resource "openobserve_alert" "budget_burned" {
+  name         = "checkout-budget-burned"
+  stream_type  = "logs"
+  stream_name  = "app_logs"
+  destinations = [openobserve_alert_destination.slack.name]
+
+  query_condition {
+    type = "slo"
+
+    slo_condition {
+      slo_id   = openobserve_slo.checkout_availability.slo_id
+      kind     = "error_budget"
+      operator = ">"
+      critical = 90 # 90% consumed
+      warning  = 75
+    }
+  }
+
+  # No threshold or operator: an SLO alert has no count gate. Its thresholds
+  # live on slo_condition, and the server rejects a trigger threshold rather
+  # than ignoring it.
+  trigger_condition {
+    period    = 5
+    frequency = 5
+  }
+}
+```
+
+**Burn rate** fires on how fast the budget is being spent, in multiples of the
+budget-neutral rate. It evaluates in two windows and fires only when *both*
+exceed the threshold, which is what keeps a brief spike from paging:
+
+```hcl
+slo_condition {
+  slo_id            = openobserve_slo.checkout_availability.slo_id
+  kind              = "burn_rate"
+  operator          = ">"
+  critical          = 14.4 # burns a 30-day budget in about two days
+  long_window_secs  = 3600 # 1 hour
+  short_window_secs = 900  # 15 minutes
+}
+```
+
+Both windows are required. A twelfth of the long window is the conventional
+choice from the Google SRE workbook, but the provider does not derive it: the
+short window must also be at least **twice the SLO's slice interval**, and that
+interval belongs to the objective, so any value guessed here could be rejected.
+A one-slice window has coverage 0 or 1, so a single gap would freeze the alert.
+
+The long window must be 1h–48h and no longer than the SLO window. Both window
+fields are meaningful only for `burn_rate`; setting them on an `error_budget`
+alert is rejected during `plan`, since it would silently do nothing.
+
+~> Per-group SLO alerting (`multi_alert`) is **not yet supported by
+OpenObserve** — it is rejected with *per-group alerting (multi_alert) is not yet
+supported for SLO alerts*. Alert on the rollup for now. Per-group alerting does
+work today on aggregation and PromQL alerts; see the [alerting guide](alerting).
+
+## Rules the provider checks before applying
+
+- `window_secs` must be 604800 (7d), 2592000 (30d), or 7776000 (90d)
+- `target` must be greater than 0 and strictly below 100
+- Exactly one indicator block
+- `absent_is_bad` cannot be combined with `group_by`
+- A burn-rate alert needs both windows
+- An SLO alert must not set `trigger_condition.threshold` or `operator`
+
+## Full examples
+
+{{ tffile "examples/resources/openobserve_slo/resource.tf" }}

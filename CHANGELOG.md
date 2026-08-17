@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-08-17
+
+### Added
+
+- **`openobserve_slo`** — service level objectives. Three indicator types, each
+  answering a different question: `count_sli` (good events over total, with
+  single-query, dual-query, and PromQL sources), `time_slice_sli` (each slice
+  good or bad against a threshold, including `absent_is_bad` for pipeline
+  freshness), and `alert_sli` (derived from an alert's firing state). Supports
+  grouping, tags, pausing, and moving between folders. SLOs live in alert
+  folders; there is no separate SLO folder type.
+- **`openobserve_slo` and `openobserve_slos` data sources** — an objective's
+  definition together with its current measurement: coverage, SLI, error budget
+  remaining, burn rate, and time to exhaustion. `status` is null until the first
+  evaluation pass, and `no_data` marks the frozen state where an objective is
+  neither healthy nor breached, so neither is reported as zero.
+- **SLO alerts** — `query_condition` gained the `slo` type and a `slo_condition`
+  block, firing on error budget consumed or on burn rate across two windows.
+- **PromQL per-group alerting** — `promql_multi_alert` evaluates and notifies per
+  returned series rather than collapsing the query to a single verdict,
+  completing per-group support across the alert families.
+- **`promql_warning_value`** — a warning level for PromQL alerts, matching the
+  warning thresholds the other families already had.
+- **Alert deduplication** — a `deduplication` block collapsing repeated firings
+  of the same underlying issue, with explicit or inferred fingerprint fields.
+- `row_template_type`, `creates_incident`, and `workflows` on `openobserve_alert`.
+- **Documentation guides** rendered into the Terraform Registry: getting
+  started, alerting, service level objectives, dashboards, and roles and groups.
+
+### Fixed
+
+- **The dashboard example documented a panel filter shape the API rejects.** A
+  list-shaped `filter` is refused with *data did not match any variant of
+  untagged enum PanelFilter*; it must be an object, and an empty group is the
+  "no filter" case. The corrected example is applied against a live server as
+  part of the test suite rather than written from the type definitions.
+
+### Validated before apply
+
+The provider now reports these during `plan`, instead of letting the server
+reject the apply:
+
+- An SLO's `window_secs` must be 7, 30, or 90 days, and `target` must fall
+  strictly inside (0, 100).
+- Exactly one SLO indicator block, and exactly one `count_sli` source.
+- `absent_is_bad` cannot be combined with `group_by`: gap fill cannot observe a
+  group missing from an entire pass, so such an objective would freeze rather
+  than fire for the very failure it watches.
+- A burn-rate alert needs both windows. The short one is deliberately not
+  derived from the long one — the minimum is twice the SLO's slice interval, and
+  that interval belongs to the objective, so a guessed value could be rejected.
+- An SLO alert must not set `trigger_condition.threshold` or `operator`: that
+  family has no count gate, and its thresholds live on `slo_condition`.
+- `trigger_condition.warning_threshold` is not accepted on aggregation alerts,
+  where the count threshold is coverage rather than severity; the warning level
+  belongs on `aggregation.warning_value`.
+
+### Known limitations
+
+- Per-group SLO alerting (`slo_condition.multi_alert`) is not yet supported by
+  OpenObserve and is rejected server-side. The attribute is present so it starts
+  working the moment the server does. Per-group alerting works today on
+  aggregation and PromQL alerts.
+
 ## [1.0.1] — 2026-08-15
 
 Packaging and licensing corrections. No provider behaviour changed; the
@@ -141,6 +205,7 @@ a stream or dashboard onto the new schema without touching the server.
 - Comprehensive examples for all resources and data sources
 - Apache 2.0 license
 
+[1.1.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.1.0
 [1.0.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.0.1
 [1.0.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.0.0
 [0.0.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v0.0.1

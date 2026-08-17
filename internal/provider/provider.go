@@ -118,6 +118,7 @@ func (p *OpenObserveProvider) Resources(_ context.Context) []func() resource.Res
 		NewAlertTemplateResource,
 		NewAlertDestinationResource,
 		NewAlertResource,
+		NewSloResource,
 	}
 }
 
@@ -146,6 +147,8 @@ func (p *OpenObserveProvider) DataSources(_ context.Context) []func() datasource
 		NewAlertDestinationsDataSource,
 		NewAlertDataSource,
 		NewAlertsDataSource,
+		NewSloDataSource,
+		NewSlosDataSource,
 	}
 }
 

@@ -482,3 +482,415 @@ func containsStream(streams []StreamAPI, name string) bool {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestIntegrationSloLifecycle(t *testing.T) {
+	c := integrationClient(t)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+
+	streamName := uniqueName("tf_it_slo_stream")
+	if err := c.CreateStream(ctx, org, "logs", streamName, CreateStreamAPI{}); err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteStream(ctx, org, "logs", streamName) })
+
+	name := uniqueName("tf_it_slo")
+	config, err := json.Marshal(map[string]any{
+		"source": map[string]any{
+			"mode": "single_query",
+			"query": SloCountSingleQueryAPI{
+				Stream:     streamName,
+				StreamType: "logs",
+				GoodExpr:   "code < 500",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshalling count source: %v", err)
+	}
+
+	sloID, err := c.CreateSlo(ctx, org, SloAPI{
+		Name:        name,
+		Description: "integration test",
+		SliType:     "count",
+		Config:      config,
+		WindowSecs:  2592000,
+		SliceSecs:   300,
+		Target:      99.9,
+		Enabled:     true,
+	})
+	if err != nil {
+		t.Fatalf("CreateSlo: %v", err)
+	}
+	if sloID == "" {
+		t.Fatal("CreateSlo did not return an SLO ID")
+	}
+	t.Cleanup(func() {
+		if err := c.DeleteSlo(ctx, org, sloID); err != nil {
+			t.Errorf("DeleteSlo: %v", err)
+		}
+	})
+
+	slo, err := c.GetSlo(ctx, org, sloID)
+	if err != nil {
+		t.Fatalf("GetSlo: %v", err)
+	}
+	if slo == nil {
+		t.Fatal("GetSlo returned nothing for an SLO that was just created")
+	}
+	if slo.SliType != "count" {
+		t.Errorf("sli_type = %q, want count", slo.SliType)
+	}
+	if slo.Target != 99.9 {
+		t.Errorf("target = %v, want 99.9", slo.Target)
+	}
+	// The adjacently tagged count source has to survive the round trip, since
+	// that nesting is the easiest part of this shape to get wrong.
+	var wrapper struct {
+		Source struct {
+			Mode  string                 `json:"mode"`
+			Query SloCountSingleQueryAPI `json:"query"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(slo.Config, &wrapper); err != nil {
+		t.Fatalf("decoding count source: %v (raw: %s)", err, slo.Config)
+	}
+	if wrapper.Source.Mode != "single_query" || wrapper.Source.Query.GoodExpr != "code < 500" {
+		t.Errorf("count source round-tripped as %+v", wrapper.Source)
+	}
+
+	slo.Target = 99.5
+	if err := c.UpdateSlo(ctx, org, sloID, *slo); err != nil {
+		t.Fatalf("UpdateSlo: %v", err)
+	}
+	slo, err = c.GetSlo(ctx, org, sloID)
+	if err != nil {
+		t.Fatalf("GetSlo after update: %v", err)
+	}
+	if slo.Target != 99.5 {
+		t.Errorf("target after update = %v, want 99.5", slo.Target)
+	}
+
+	// Enablement is a separate endpoint rather than a field on the update body.
+	if err := c.SetSloEnabled(ctx, org, sloID, false); err != nil {
+		t.Fatalf("SetSloEnabled: %v", err)
+	}
+	slo, err = c.GetSlo(ctx, org, sloID)
+	if err != nil {
+		t.Fatalf("GetSlo after pause: %v", err)
+	}
+	if slo.Enabled {
+		t.Error("SLO still reports enabled after being paused")
+	}
+
+	found, err := c.FindSloByName(ctx, org, "", name)
+	if err != nil {
+		t.Fatalf("FindSloByName: %v", err)
+	}
+	if found == nil || found.ID != sloID {
+		t.Errorf("FindSloByName = %+v, want SLO ID %q", found, sloID)
+	}
+}
+
+func TestIntegrationSloTimeSliceAndGrouping(t *testing.T) {
+	c := integrationClient(t)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+
+	streamName := uniqueName("tf_it_slo_ts_stream")
+	if err := c.CreateStream(ctx, org, "logs", streamName, CreateStreamAPI{}); err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteStream(ctx, org, "logs", streamName) })
+
+	config, err := json.Marshal(SloTimeSliceConfigAPI{
+		Stream:        streamName,
+		StreamType:    "logs",
+		QueryLanguage: "sql",
+		Query:         fmt.Sprintf("SELECT count(_timestamp) AS zo_slo_value FROM %q", streamName),
+		Comparator:    ">",
+		Threshold:     0,
+	})
+	if err != nil {
+		t.Fatalf("marshalling time-slice config: %v", err)
+	}
+
+	sloID, err := c.CreateSlo(ctx, org, SloAPI{
+		Name:       uniqueName("tf_it_slo_ts"),
+		SliType:    "time_slice",
+		Config:     config,
+		GroupBy:    []string{"service"},
+		WindowSecs: 604800,
+		SliceSecs:  300,
+		Target:     99,
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("CreateSlo (time_slice): %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteSlo(ctx, org, sloID) })
+
+	slo, err := c.GetSlo(ctx, org, sloID)
+	if err != nil {
+		t.Fatalf("GetSlo: %v", err)
+	}
+	if slo == nil {
+		t.Fatal("GetSlo returned nothing")
+	}
+	if len(slo.GroupBy) != 1 || slo.GroupBy[0] != "service" {
+		t.Errorf("group_by = %v, want [service]", slo.GroupBy)
+	}
+	var ts SloTimeSliceConfigAPI
+	if err := json.Unmarshal(slo.Config, &ts); err != nil {
+		t.Fatalf("decoding time-slice config: %v (raw: %s)", err, slo.Config)
+	}
+	if ts.Comparator != ">" || ts.QueryLanguage != "sql" {
+		t.Errorf("time-slice config round-tripped as %+v", ts)
+	}
+}
+
+// integrationDestination creates a template and destination for tests that need
+// somewhere to send to. OpenObserve rejects an alert that has neither a
+// destination nor a workflow.
+func integrationDestination(t *testing.T, c *Client, ctx context.Context, org string) string {
+	t.Helper()
+
+	templateName := uniqueName("tf_it_tmpl")
+	if err := c.CreateAlertTemplate(ctx, org, AlertTemplateAPI{
+		Name:         templateName,
+		Body:         `{"text":"{alert_name}"}`,
+		TemplateType: "http",
+	}); err != nil {
+		t.Fatalf("CreateAlertTemplate: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteAlertTemplate(ctx, org, templateName) })
+
+	destName := uniqueName("tf_it_dest")
+	if err := c.CreateAlertDestination(ctx, org, AlertDestinationAPI{
+		Name:            destName,
+		DestinationType: "http",
+		URL:             "https://example.com/hook",
+		Method:          "post",
+		Template:        &templateName,
+		Emails:          []string{},
+	}); err != nil {
+		t.Fatalf("CreateAlertDestination: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteAlertDestination(ctx, org, destName) })
+
+	return destName
+}
+
+// TestIntegrationAlertVariants covers the query families and the simple vs
+// multi-alert distinction, which are the parts of the alert schema most likely
+// to drift from the server.
+func TestIntegrationAlertVariants(t *testing.T) {
+	c := integrationClient(t)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+
+	streamName := uniqueName("tf_it_alert_variants")
+	if err := c.CreateStream(ctx, org, "logs", streamName, CreateStreamAPI{}); err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteStream(ctx, org, "logs", streamName) })
+
+	destName := integrationDestination(t, c, ctx, org)
+	warning := 50.0
+	sql := fmt.Sprintf("SELECT count(_timestamp) AS total FROM %q", streamName)
+	promql := "sum by (pod) (rate(errors_total[5m]))"
+
+	cases := []struct {
+		name  string
+		query AlertQueryConditionAPI
+		check func(t *testing.T, got *AlertQueryConditionAPI)
+	}{
+		{
+			name:  "sql",
+			query: AlertQueryConditionAPI{QueryType: "sql", SQL: &sql},
+			check: func(t *testing.T, got *AlertQueryConditionAPI) {
+				if got.SQL == nil || *got.SQL != sql {
+					t.Errorf("sql = %v, want it preserved", got.SQL)
+				}
+			},
+		},
+		{
+			name: "aggregation multi alert",
+			query: AlertQueryConditionAPI{
+				QueryType: "custom",
+				Aggregation: &AlertAggregationAPI{
+					GroupBy:      []string{"service"},
+					Function:     "p95",
+					MultiAlert:   true,
+					WarningValue: &warning,
+					Having: AlertConditionAPI{
+						Column:   "duration_ms",
+						Operator: ">",
+						Value:    json.RawMessage("100"),
+					},
+				},
+			},
+			check: func(t *testing.T, got *AlertQueryConditionAPI) {
+				if got.Aggregation == nil {
+					t.Fatal("aggregation was dropped")
+				}
+				if !got.Aggregation.MultiAlert {
+					t.Error("multi_alert did not survive the round trip")
+				}
+				if got.Aggregation.WarningValue == nil {
+					t.Error("warning_value did not survive the round trip")
+				}
+			},
+		},
+		{
+			name: "promql multi alert",
+			query: AlertQueryConditionAPI{
+				QueryType:        "promql",
+				PromQL:           &promql,
+				PromQLMultiAlert: true,
+				PromQLCondition: &AlertConditionAPI{
+					Column:   "value",
+					Operator: ">",
+					Value:    json.RawMessage("10"),
+				},
+			},
+			check: func(t *testing.T, got *AlertQueryConditionAPI) {
+				if !got.PromQLMultiAlert {
+					t.Error("promql_multi_alert did not survive the round trip")
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			alertID, err := c.CreateAlert(ctx, org, "default", AlertAPI{
+				Name:           uniqueName("tf-it-variant"),
+				StreamType:     "logs",
+				StreamName:     streamName,
+				Destinations:   []string{destName},
+				Enabled:        true,
+				QueryCondition: tc.query,
+				TriggerCondition: AlertTriggerConditionAPI{
+					Period:        10,
+					Operator:      ">=",
+					Threshold:     1,
+					Frequency:     5,
+					FrequencyType: "minutes",
+					AlignTime:     true,
+				},
+			})
+			if err != nil {
+				t.Fatalf("CreateAlert: %v", err)
+			}
+			t.Cleanup(func() { _ = c.DeleteAlert(ctx, org, alertID) })
+
+			got, err := c.GetAlert(ctx, org, alertID)
+			if err != nil {
+				t.Fatalf("GetAlert: %v", err)
+			}
+			if got == nil {
+				t.Fatal("GetAlert returned nothing")
+			}
+			if got.QueryCondition.QueryType != tc.query.QueryType {
+				t.Errorf("query type = %q, want %q", got.QueryCondition.QueryType, tc.query.QueryType)
+			}
+			tc.check(t, &got.QueryCondition)
+		})
+	}
+}
+
+// TestIntegrationSloAlert covers an alert that reads a precomputed objective
+// rather than running its own query.
+func TestIntegrationSloAlert(t *testing.T) {
+	c := integrationClient(t)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+
+	streamName := uniqueName("tf_it_slo_alert_stream")
+	if err := c.CreateStream(ctx, org, "logs", streamName, CreateStreamAPI{}); err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteStream(ctx, org, "logs", streamName) })
+
+	config, err := json.Marshal(map[string]any{
+		"source": map[string]any{
+			"mode": "single_query",
+			"query": SloCountSingleQueryAPI{
+				Stream:     streamName,
+				StreamType: "logs",
+				GoodExpr:   "code < 500",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshalling count source: %v", err)
+	}
+	sloID, err := c.CreateSlo(ctx, org, SloAPI{
+		Name:       uniqueName("tf_it_slo_for_alert"),
+		SliType:    "count",
+		Config:     config,
+		WindowSecs: 2592000,
+		SliceSecs:  300,
+		Target:     99.9,
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("CreateSlo: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteSlo(ctx, org, sloID) })
+
+	warning := 75.0
+	destName := integrationDestination(t, c, ctx, org)
+	alertID, err := c.CreateAlert(ctx, org, "default", AlertAPI{
+		Name:         uniqueName("tf-it-slo-alert"),
+		StreamType:   "logs",
+		StreamName:   streamName,
+		Destinations: []string{destName},
+		Enabled:      true,
+		QueryCondition: AlertQueryConditionAPI{
+			QueryType: "slo",
+			SloCondition: &AlertSloConditionAPI{
+				SloID:    sloID,
+				Kind:     "error_budget",
+				Operator: ">",
+				Critical: 90,
+				Warning:  &warning,
+			},
+		},
+		// No count gate: an SLO alert is thresholded by its slo_condition, and
+		// the server rejects a non-default trigger threshold rather than
+		// ignoring it. The operator still has to be a valid variant.
+		TriggerCondition: AlertTriggerConditionAPI{
+			Period:        5,
+			Operator:      "=",
+			Frequency:     5,
+			FrequencyType: "minutes",
+			AlignTime:     true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateAlert (slo): %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteAlert(ctx, org, alertID) })
+
+	got, err := c.GetAlert(ctx, org, alertID)
+	if err != nil {
+		t.Fatalf("GetAlert: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetAlert returned nothing")
+	}
+	if got.QueryCondition.SloCondition == nil {
+		t.Fatal("slo_condition was dropped")
+	}
+	if got.QueryCondition.SloCondition.SloID != sloID {
+		t.Errorf("slo_id = %q, want %q", got.QueryCondition.SloCondition.SloID, sloID)
+	}
+	if got.QueryCondition.SloCondition.Kind != "error_budget" {
+		t.Errorf("kind = %q, want error_budget", got.QueryCondition.SloCondition.Kind)
+	}
+	if got.QueryCondition.SloCondition.Warning == nil {
+		t.Error("warning threshold did not survive the round trip")
+	}
+}

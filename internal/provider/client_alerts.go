@@ -149,17 +149,40 @@ type AlertCompareHistoricData struct {
 	Offset string `json:"offSet"`
 }
 
+// AlertSloConditionAPI fires on an SLO's error budget or burn rate rather than
+// on a query result.
+type AlertSloConditionAPI struct {
+	SloID           string   `json:"slo_id"`
+	Kind            string   `json:"kind"`
+	Operator        string   `json:"operator"`
+	Critical        float64  `json:"critical"`
+	Warning         *float64 `json:"warning,omitempty"`
+	LongWindowSecs  *int64   `json:"long_window_secs,omitempty"`
+	ShortWindowSecs *int64   `json:"short_window_secs,omitempty"`
+	MultiAlert      bool     `json:"multi_alert,omitempty"`
+}
+
 // AlertQueryConditionAPI describes what an alert evaluates.
 type AlertQueryConditionAPI struct {
-	QueryType       string                     `json:"type"`
-	Conditions      json.RawMessage            `json:"conditions,omitempty"`
-	SQL             *string                    `json:"sql,omitempty"`
-	PromQL          *string                    `json:"promql,omitempty"`
-	PromQLCondition *AlertConditionAPI         `json:"promql_condition,omitempty"`
-	Aggregation     *AlertAggregationAPI       `json:"aggregation,omitempty"`
-	VRLFunction     *string                    `json:"vrl_function,omitempty"`
-	SearchEventType *string                    `json:"search_event_type,omitempty"`
-	MultiTimeRange  []AlertCompareHistoricData `json:"multi_time_range,omitempty"`
+	QueryType          string                     `json:"type"`
+	Conditions         json.RawMessage            `json:"conditions,omitempty"`
+	SQL                *string                    `json:"sql,omitempty"`
+	PromQL             *string                    `json:"promql,omitempty"`
+	PromQLCondition    *AlertConditionAPI         `json:"promql_condition,omitempty"`
+	PromQLWarningValue *float64                   `json:"promql_warning_value,omitempty"`
+	PromQLMultiAlert   bool                       `json:"promql_multi_alert,omitempty"`
+	Aggregation        *AlertAggregationAPI       `json:"aggregation,omitempty"`
+	VRLFunction        *string                    `json:"vrl_function,omitempty"`
+	SearchEventType    *string                    `json:"search_event_type,omitempty"`
+	MultiTimeRange     []AlertCompareHistoricData `json:"multi_time_range,omitempty"`
+	SloCondition       *AlertSloConditionAPI      `json:"slo_condition,omitempty"`
+}
+
+// AlertDeduplicationAPI collapses repeated firings of the same underlying issue.
+type AlertDeduplicationAPI struct {
+	Enabled           bool     `json:"enabled"`
+	FingerprintFields []string `json:"fingerprint_fields,omitempty"`
+	TimeWindowMinutes *int64   `json:"time_window_minutes,omitempty"`
 }
 
 // AlertTriggerConditionAPI describes when and how often an alert fires.
@@ -192,6 +215,7 @@ type AlertAPI struct {
 	Template         *string                  `json:"template,omitempty"`
 	ContextAttrs     map[string]string        `json:"context_attributes,omitempty"`
 	RowTemplate      string                   `json:"row_template"`
+	RowTemplateType  string                   `json:"row_template_type,omitempty"`
 	Description      string                   `json:"description"`
 	Enabled          bool                     `json:"enabled"`
 	TZOffset         int32                    `json:"tz_offset"`
@@ -203,6 +227,9 @@ type AlertAPI struct {
 	Priority         *int64                   `json:"priority,omitempty"`
 	Tags             []string                 `json:"tags,omitempty"`
 	FolderID         *string                  `json:"folder_id,omitempty"`
+	CreatesIncident  bool                     `json:"creates_incident,omitempty"`
+	Workflows        []string                 `json:"workflows,omitempty"`
+	Deduplication    *AlertDeduplicationAPI   `json:"deduplication,omitempty"`
 }
 
 // AlertListItemAPI is one entry of the alerts list response.
