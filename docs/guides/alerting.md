@@ -9,7 +9,7 @@ description: |-
 
 An alert has two halves. `query_condition` says *what to measure*, and
 `trigger_condition` says *when that measurement counts as a problem*. Everything
-else — destinations, templates, tags — hangs off those two.
+else, from destinations and templates to tags, hangs off those two.
 
 ## Templates and destinations
 
@@ -44,7 +44,7 @@ these combinations during `plan`, rather than letting the apply fail.
 
 ## The four query types
 
-### `sql` — an aggregate compared against a threshold
+### `sql`: an aggregate compared against a threshold
 
 ```hcl
 query_condition {
@@ -53,7 +53,7 @@ query_condition {
 }
 ```
 
-### `custom` — UI-style conditions, optionally aggregated
+### `custom`: UI-style conditions, optionally aggregated
 
 `conditions` is a JSON document, so build it with `jsonencode()`:
 
@@ -68,7 +68,7 @@ query_condition {
 }
 ```
 
-### `promql` — a metrics expression
+### `promql`: a metrics expression
 
 ```hcl
 query_condition {
@@ -83,7 +83,7 @@ query_condition {
 }
 ```
 
-### `slo` — an objective's error budget or burn rate
+### `slo`: an objective's error budget or burn rate
 
 An SLO alert reads a precomputed objective rather than running its own query, so
 it costs nothing to evaluate and fires on the same numbers the SLO page shows.
@@ -126,7 +126,7 @@ The warning must be strictly *less severe* than the critical one, which depends
 on the operator: `>` needs a smaller value, `<` a larger one.
 
 `notify_on_warning = false` records warnings in history and the UI without
-paging — useful for "wake me only on critical".
+paging. Useful for "wake me only on critical".
 
 ```hcl
 trigger_condition {
@@ -144,7 +144,7 @@ trigger_condition {
 This is the distinction worth understanding.
 
 A **simple alert** collapses the whole query to one verdict. One alert, one
-state, one notification — no matter how many services or series are involved.
+state, one notification, no matter how many services or series are involved.
 
 A **multi-alert** evaluates each group independently. Every group gets its own
 level, its own state row, and its own notifications. One breaching service pages
@@ -243,7 +243,7 @@ dimensions for `promql`.
 
 ## Folders
 
-Alerts live in folders, and so do SLOs — they share the same namespace:
+Alerts live in folders, and so do SLOs; they share the same namespace:
 
 ```hcl
 resource "openobserve_folder" "reliability" {

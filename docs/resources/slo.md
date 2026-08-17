@@ -6,7 +6,7 @@ description: |-
   Manages a service level objective.
   An SLO measures a service level indicator over a rolling window and compares it against a target. The window is divided into slices of slice_interval_secs, and each slice contributes a good/total pair.
   Exactly one indicator block must be given: count_sli (good events over total events), time_slice_sli (each slice is good or bad by threshold), or alert_sli (derived from an alert's firing state).
-  SLOs live in alert folders — there is no separate SLO folder type — so folder_id refers to an openobserve_folder with folder_type = "alerts".
+  SLOs live in alert folders, since there is no separate SLO folder type, so folder_id refers to an openobserve_folder with folder_type = "alerts".
 ---
 
 # openobserve_slo (Resource)
@@ -17,19 +17,19 @@ An SLO measures a service level indicator over a rolling window and compares it 
 
 Exactly one indicator block must be given: `count_sli` (good events over total events), `time_slice_sli` (each slice is good or bad by threshold), or `alert_sli` (derived from an alert's firing state).
 
-SLOs live in **alert folders** — there is no separate SLO folder type — so `folder_id` refers to an `openobserve_folder` with `folder_type = "alerts"`.
+SLOs live in **alert folders**, since there is no separate SLO folder type, so `folder_id` refers to an `openobserve_folder` with `folder_type = "alerts"`.
 
 ## Example Usage
 
 ```terraform
-# SLOs live in alert folders — there is no separate SLO folder type.
+# SLOs live in alert folders. There is no separate SLO folder type.
 resource "openobserve_folder" "reliability" {
   folder_type = "alerts"
   name        = "Reliability"
 }
 
 # Availability: good requests over total requests, counted in a single scan.
-# This is the form to prefer — one query means the numerator and denominator
+# This is the form to prefer, because one query means the numerator and denominator
 # are provably drawn from the same rows.
 resource "openobserve_slo" "checkout_availability" {
   folder_id   = openobserve_folder.reliability.folder_id
@@ -115,8 +115,8 @@ resource "openobserve_slo" "ingest_freshness" {
   }
 }
 
-# Metrics-native counting. Pre-aggregated counters have no rows to classify —
-# "good" only exists as arithmetic between series — so use a range selector
+# Metrics-native counting. Pre-aggregated counters have no rows to classify,
+# since "good" only exists as arithmetic between series, so use a range selector
 # equal to the slice interval.
 resource "openobserve_slo" "http_success_rate" {
   folder_id = openobserve_folder.reliability.folder_id

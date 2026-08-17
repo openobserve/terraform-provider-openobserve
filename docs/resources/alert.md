@@ -307,7 +307,7 @@ Optional:
 - `kind` (String) What the threshold applies to: `error_budget` (percentage of the budget consumed over the window) or `burn_rate` (multiples of the budget-neutral rate, evaluated in two windows).
 - `long_window_secs` (Number) `burn_rate` only. The long evaluation window: 1h to 48h, no longer than the SLO window, and an exact multiple of at least twice the slice interval.
 - `multi_alert` (Boolean) Evaluate and notify per SLO group rather than on the objective as a whole. Requires a grouped SLO.
-- `operator` (String) Comparison against the thresholds. Ascending only — `>` or `>=` — because both budget consumption and burn rate are bad when high.
+- `operator` (String) Comparison against the thresholds. Ascending only, `>` or `>=`, because both budget consumption and burn rate are bad when high.
 - `short_window_secs` (Number) `burn_rate` only, and required alongside `long_window_secs`. A twelfth of the long window is the conventional choice, following the Google SRE workbook, but it must also be at least twice the SLO's slice interval: a one-slice window has coverage 0 or 1, so a single gap would freeze the alert.
 - `slo_id` (String) Objective to watch, as produced by `openobserve_slo.slo_id`.
 - `warning` (Number) Warning threshold, sharing `operator` with the critical one. Omit for a single-level alert.

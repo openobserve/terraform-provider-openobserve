@@ -67,7 +67,7 @@ that user's `openobserve_user.custom_roles`. Both write the same underlying
 grant.
 
 !> Use one or the other. Doing both means two resources own the same fact, and
-each will try to remove what the other adds — every plan will show changes.
+each will try to remove what the other adds, so every plan will show changes.
 
 Members who hold a role through a group do not appear in `openobserve_role.users`,
 because the group holds the grant rather than the user.
@@ -76,7 +76,7 @@ because the group holds the grant rather than the user.
 
 Role and group names may contain only letters, digits, and underscores.
 OpenObserve silently rewrites anything else to an underscore, which would leave
-Terraform tracking a name the server does not have — so the provider rejects such
+Terraform tracking a name the server does not have, so the provider rejects such
 names during `plan` instead.
 
 ## Service accounts

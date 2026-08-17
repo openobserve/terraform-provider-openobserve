@@ -39,8 +39,8 @@ func sloStatusSchema() map[string]schema.Attribute {
 		},
 		"no_data": schema.BoolAttribute{
 			Computed: true,
-			Description: "True when coverage sits below the floor. The objective is then frozen — neither healthy " +
-				"nor breached — and every derived figure below is null.",
+			Description: "True when coverage sits below the floor. The objective is then frozen, neither healthy " +
+				"nor breached, and every derived figure below is null.",
 		},
 		"sli": schema.Float64Attribute{
 			Computed:    true,
@@ -160,7 +160,7 @@ func (d *SloDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, re
 			"owner":   schema.StringAttribute{Computed: true, Description: "Objective owner."},
 			"status": schema.SingleNestedAttribute{
 				Computed: true,
-				Description: "Current measurement. Null until the first evaluation pass has run — \"not yet " +
+				Description: "Current measurement. Null until the first evaluation pass has run. \"Not yet " +
 					"measured\" and \"measured as zero\" are different answers.",
 				Attributes: sloStatusSchema(),
 			},

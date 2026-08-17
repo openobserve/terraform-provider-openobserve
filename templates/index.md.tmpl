@@ -19,10 +19,10 @@ If you are new to the provider, start with the
 [Getting Started](guides/getting-started) guide. The remaining guides cover the
 areas with the most moving parts:
 
-- [Alerting](guides/alerting) — templates, destinations, and every alert query type
-- [Service level objectives](guides/slos) — indicators, error budgets, and burn-rate alerts
-- [Dashboards](guides/dashboards) — panel JSON, and how to avoid hand-writing it
-- [Roles and groups](guides/rbac) — permissions, groups, and service accounts
+- [Alerting](guides/alerting): templates, destinations, and every alert query type
+- [Service level objectives](guides/slos): indicators, error budgets, and burn-rate alerts
+- [Dashboards](guides/dashboards): panel JSON, and how to avoid hand-writing it
+- [Roles and groups](guides/rbac): permissions, groups, and service accounts
 
 ## Organization scoping
 
@@ -53,6 +53,6 @@ resource "openobserve_stream" "team_logs" {
 Custom roles, groups, and the permission resource list require OpenObserve
 Enterprise with OpenFGA enabled. Against an open-source deployment those
 resources return a diagnostic saying so, rather than an opaque HTTP 403.
-Everything else — including SLOs — works on both editions.
+Everything else, including SLOs, works on both editions.
 
 {{ .SchemaMarkdown | trimspace }}

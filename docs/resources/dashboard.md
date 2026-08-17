@@ -52,8 +52,8 @@ resource "openobserve_dashboard" "errors" {
             config      = { promql_legend = "" }
 
             fields = {
-              # Watch the casing. Every key in a panel is camelCase — tabId,
-              # queryType, customQuery, aggregationFunction — except this
+              # Watch the casing. Every key in a panel is camelCase (tabId,
+              # queryType, customQuery, aggregationFunction) except this
               # `fields` object, which the API defines in snake_case.
               stream      = "app_logs"
               stream_type = "logs"

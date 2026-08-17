@@ -351,8 +351,8 @@ func reconcileJSON(configured types.String, serverBody json.RawMessage, diags *d
 // reconcileStringSet decides what an Optional+Computed set attribute should
 // hold after a write or a read.
 //
-// OpenObserve derives some list settings from others — a bloom filter field is
-// also registered as a secondary index field, for example — so the server's
+// OpenObserve derives some list settings from others (a bloom filter field is
+// also registered as a secondary index field, for example), so the server's
 // list can be a strict superset of what was configured. Reporting those
 // additions would produce a diff the user cannot resolve, so a superset keeps
 // the configured value and anything else is treated as real drift.

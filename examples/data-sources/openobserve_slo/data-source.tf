@@ -2,7 +2,7 @@ data "openobserve_slo" "checkout" {
   name = "checkout_availability"
 }
 
-# `status` is null until the first evaluation pass has run — "not yet measured"
+# `status` is null until the first evaluation pass has run. "Not yet measured"
 # and "measured as zero" are different answers, so the provider does not
 # conflate them.
 output "budget_remaining_pct" {

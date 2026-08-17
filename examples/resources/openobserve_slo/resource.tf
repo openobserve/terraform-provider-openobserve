@@ -1,11 +1,11 @@
-# SLOs live in alert folders — there is no separate SLO folder type.
+# SLOs live in alert folders. There is no separate SLO folder type.
 resource "openobserve_folder" "reliability" {
   folder_type = "alerts"
   name        = "Reliability"
 }
 
 # Availability: good requests over total requests, counted in a single scan.
-# This is the form to prefer — one query means the numerator and denominator
+# This is the form to prefer, because one query means the numerator and denominator
 # are provably drawn from the same rows.
 resource "openobserve_slo" "checkout_availability" {
   folder_id   = openobserve_folder.reliability.folder_id
@@ -91,8 +91,8 @@ resource "openobserve_slo" "ingest_freshness" {
   }
 }
 
-# Metrics-native counting. Pre-aggregated counters have no rows to classify —
-# "good" only exists as arithmetic between series — so use a range selector
+# Metrics-native counting. Pre-aggregated counters have no rows to classify,
+# since "good" only exists as arithmetic between series, so use a range selector
 # equal to the slice interval.
 resource "openobserve_slo" "http_success_rate" {
   folder_id = openobserve_folder.reliability.folder_id

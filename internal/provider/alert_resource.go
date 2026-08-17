@@ -414,7 +414,7 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 							},
 							"operator": schema.StringAttribute{
 								Optional: true,
-								Description: "Comparison against the thresholds. Ascending only — `>` or `>=` — " +
+								Description: "Comparison against the thresholds. Ascending only, `>` or `>=`, " +
 									"because both budget consumption and burn rate are bad when high.",
 								Validators: []validator.String{stringvalidator.OneOf(">", ">=")},
 							},
@@ -654,7 +654,7 @@ func (r *AlertResource) ValidateConfig(ctx context.Context, req resource.Validat
 				"Burn-rate alerts need both windows",
 				"Set `long_window_secs` and `short_window_secs`. A twelfth of the long window is the "+
 					"conventional starting point, but the short window must also be at least twice the "+
-					"SLO's slice interval — a one-slice window has coverage 0 or 1, so a single gap would "+
+					"SLO's slice interval. A one-slice window has coverage 0 or 1, so a single gap would "+
 					"freeze the alert.",
 			)
 		}

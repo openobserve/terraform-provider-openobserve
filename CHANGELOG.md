@@ -5,30 +5,30 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.0] — 2026-08-17
+## [1.1.0] - 2026-08-17
 
 ### Added
 
-- **`openobserve_slo`** — service level objectives. Three indicator types, each
+- **`openobserve_slo`**: service level objectives. Three indicator types, each
   answering a different question: `count_sli` (good events over total, with
   single-query, dual-query, and PromQL sources), `time_slice_sli` (each slice
   good or bad against a threshold, including `absent_is_bad` for pipeline
   freshness), and `alert_sli` (derived from an alert's firing state). Supports
   grouping, tags, pausing, and moving between folders. SLOs live in alert
   folders; there is no separate SLO folder type.
-- **`openobserve_slo` and `openobserve_slos` data sources** — an objective's
+- **`openobserve_slo` and `openobserve_slos` data sources**: an objective's
   definition together with its current measurement: coverage, SLI, error budget
   remaining, burn rate, and time to exhaustion. `status` is null until the first
   evaluation pass, and `no_data` marks the frozen state where an objective is
   neither healthy nor breached, so neither is reported as zero.
-- **SLO alerts** — `query_condition` gained the `slo` type and a `slo_condition`
+- **SLO alerts**: `query_condition` gained the `slo` type and a `slo_condition`
   block, firing on error budget consumed or on burn rate across two windows.
-- **PromQL per-group alerting** — `promql_multi_alert` evaluates and notifies per
+- **PromQL per-group alerting**: `promql_multi_alert` evaluates and notifies per
   returned series rather than collapsing the query to a single verdict,
   completing per-group support across the alert families.
-- **`promql_warning_value`** — a warning level for PromQL alerts, matching the
+- **`promql_warning_value`**: a warning level for PromQL alerts, matching the
   warning thresholds the other families already had.
-- **Alert deduplication** — a `deduplication` block collapsing repeated firings
+- **Alert deduplication**: a `deduplication` block collapsing repeated firings
   of the same underlying issue, with explicit or inferred fingerprint fields.
 - `row_template_type`, `creates_incident`, and `workflows` on `openobserve_alert`.
 - **Documentation guides** rendered into the Terraform Registry: getting
@@ -54,7 +54,7 @@ reject the apply:
   group missing from an entire pass, so such an objective would freeze rather
   than fire for the very failure it watches.
 - A burn-rate alert needs both windows. The short one is deliberately not
-  derived from the long one — the minimum is twice the SLO's slice interval, and
+  derived from the long one, because the minimum is twice the SLO's slice interval, and
   that interval belongs to the objective, so a guessed value could be rejected.
 - An SLO alert must not set `trigger_condition.threshold` or `operator`: that
   family has no count gate, and its thresholds live on `slo_condition`.
@@ -69,7 +69,7 @@ reject the apply:
   working the moment the server does. Per-group alerting works today on
   aggregation and PromQL alerts.
 
-## [1.0.1] — 2026-08-15
+## [1.0.1] - 2026-08-15
 
 Packaging and licensing corrections. No provider behaviour changed; the
 resource and data source schemas are identical to `1.0.0`.
@@ -78,7 +78,7 @@ resource and data source schemas are identical to `1.0.0`.
 
 - **The repository was not recognised as Apache-2.0 licensed.** `LICENSE` held a
   modified copy of the Apache-2.0 text, differing from the canonical wording on
-  135 lines — the definitions of "Work" and "Contribution" had been rewritten,
+  135 lines. The definitions of "Work" and "Contribution" had been rewritten,
   along with clauses in the patent-litigation and liability sections. GitHub
   therefore classified the repository as `NOASSERTION`, and the OpenTofu
   registry refused to serve the provider's documentation with *451 Unavailable
@@ -101,7 +101,7 @@ resource and data source schemas are identical to `1.0.0`.
   checkout directory, which differs between CI and a local clone. Both now go
   through `make docs`.
 
-## [1.0.0] — 2026-08-14
+## [1.0.0] - 2026-08-14
 
 First release with a stability commitment. The `0.0.x` line was a preview: three
 of its resources did not work against the API at all, and fixing them required
@@ -141,14 +141,14 @@ a stream or dashboard onto the new schema without touching the server.
 ### Added
 
 #### Resources
-- **`openobserve_organization`** — create and rename organizations. OpenObserve exposes no organization delete API, so destroying the resource removes it from state and warns.
-- **`openobserve_folder`** — folders for dashboards, alerts, reports, and synthetics.
-- **`openobserve_service_account`** — service accounts with API token issuance and rotation through a `rotate_token` trigger. The token is only returned on creation and rotation, so it is stored in state and marked sensitive.
-- **`openobserve_role`** — custom roles and their permissions, expressed as `{object, permission}` pairs against a resource type (`stream`) or a single entity (`stream:my_logs`). Enterprise only.
-- **`openobserve_group`** — user groups and the custom roles they grant. Enterprise only.
-- **`openobserve_alert_template`** — notification message templates for the `http`, `email`, and `sns` channels.
-- **`openobserve_alert_destination`** — webhook, email, and SNS destinations, with plan-time validation of the fields each type requires.
-- **`openobserve_alert`** — scheduled and real-time alerts covering SQL, PromQL, and aggregation queries, warning thresholds, cron scheduling, priority, and tags.
+- **`openobserve_organization`**: create and rename organizations. OpenObserve exposes no organization delete API, so destroying the resource removes it from state and warns.
+- **`openobserve_folder`**: folders for dashboards, alerts, reports, and synthetics.
+- **`openobserve_service_account`**: service accounts with API token issuance and rotation through a `rotate_token` trigger. The token is only returned on creation and rotation, so it is stored in state and marked sensitive.
+- **`openobserve_role`**: custom roles and their permissions, expressed as `{object, permission}` pairs against a resource type (`stream`) or a single entity (`stream:my_logs`). Enterprise only.
+- **`openobserve_group`**: user groups and the custom roles they grant. Enterprise only.
+- **`openobserve_alert_template`**: notification message templates for the `http`, `email`, and `sns` channels.
+- **`openobserve_alert_destination`**: webhook, email, and SNS destinations, with plan-time validation of the fields each type requires.
+- **`openobserve_alert`**: scheduled and real-time alerts covering SQL, PromQL, and aggregation queries, warning thresholds, cron scheduling, priority, and tags.
 
 #### Data Sources
 - `openobserve_organizations`, `openobserve_streams`, `openobserve_user`, `openobserve_users`, `openobserve_user_roles`, `openobserve_service_accounts`, `openobserve_role`, `openobserve_roles`, `openobserve_group`, `openobserve_groups`, `openobserve_resources`, `openobserve_folder`, `openobserve_folders`, `openobserve_dashboard`, `openobserve_dashboards`, `openobserve_alert_template`, `openobserve_alert_templates`, `openobserve_alert_destination`, `openobserve_alert_destinations`, `openobserve_alert`, `openobserve_alerts`
@@ -180,7 +180,7 @@ a stream or dashboard onto the new schema without touching the server.
 - **Breaking:** `openobserve_stream` settings moved from a nested `settings` block to top-level attributes, and `partition_keys` is an attribute (`partition_keys = [{ … }]`) rather than a block. The old block never worked against the API, so no working configuration is affected.
 - **Breaking:** `openobserve_dashboard` takes the dashboard document in `dashboard_json` rather than separate `title`, `panels`, and `variables` attributes. This keeps the resource faithful to every dashboard schema version instead of modelling one of them.
 
-## [0.0.1] — 2024-04-30
+## [0.0.1] - 2024-04-30
 
 ### Added
 
@@ -190,13 +190,13 @@ a stream or dashboard onto the new schema without touching the server.
 - Publishes to the Terraform Registry as `openobserve/openobserve`
 
 #### Resources
-- **`openobserve_stream`** — manage stream settings (retention, full-text search keys, index fields, bloom-filter fields, partition keys) for `logs`, `metrics`, and `traces` streams; `terraform import` support with `{org_id}/{stream_type}/{name}`
-- **`openobserve_dashboard`** — create, update, and delete dashboards with a full JSON `definition` field that captures panels, variables, and layout; `terraform import` support with `{org_id}/{dashboard_id}`
-- **`openobserve_user`** — manage users within an organization including role (`admin`, `editor`, `viewer`) and optional password; `terraform import` support with `{org_id}/{email}`
+- **`openobserve_stream`**: manage stream settings (retention, full-text search keys, index fields, bloom-filter fields, partition keys) for `logs`, `metrics`, and `traces` streams; `terraform import` support with `{org_id}/{stream_type}/{name}`
+- **`openobserve_dashboard`**: create, update, and delete dashboards with a full JSON `definition` field that captures panels, variables, and layout; `terraform import` support with `{org_id}/{dashboard_id}`
+- **`openobserve_user`**: manage users within an organization including role (`admin`, `editor`, `viewer`) and optional password; `terraform import` support with `{org_id}/{email}`
 
 #### Data Sources
-- **`openobserve_stream`** — read stream settings and storage type for an existing stream
-- **`openobserve_organization`** — look up organization metadata by identifier
+- **`openobserve_stream`**: read stream settings and storage type for an existing stream
+- **`openobserve_organization`**: look up organization metadata by identifier
 
 #### Repository
 - GoReleaser v2 build pipeline with multi-platform binaries, SHA256 checksums, and GPG signing

@@ -149,7 +149,7 @@ func (r *SloResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 			"Exactly one indicator block must be given: `count_sli` (good events over total events), " +
 			"`time_slice_sli` (each slice is good or bad by threshold), or `alert_sli` (derived from an alert's " +
 			"firing state).\n\n" +
-			"SLOs live in **alert folders** — there is no separate SLO folder type — so `folder_id` refers to an " +
+			"SLOs live in **alert folders**, since there is no separate SLO folder type, so `folder_id` refers to an " +
 			"`openobserve_folder` with `folder_type = \"alerts\"`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{

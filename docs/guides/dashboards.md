@@ -37,7 +37,7 @@ resource "openobserve_dashboard" "errors" {
 
 You get the exact schema for whichever chart types you use, and `jsonencode()`
 is not fighting you. Drop `dashboardId` and `created` from the exported file if
-present — the server fills those in.
+present, since the server fills those in.
 
 ## Writing it by hand
 
@@ -77,8 +77,8 @@ resource "openobserve_dashboard" "errors" {
             config      = { promql_legend = "" }
 
             fields = {
-              # Watch the casing. Every key in a panel is camelCase — tabId,
-              # queryType, customQuery, aggregationFunction — except this
+              # Watch the casing. Every key in a panel is camelCase (tabId,
+              # queryType, customQuery, aggregationFunction) except this
               # `fields` object, which the API defines in snake_case.
               stream      = "app_logs"
               stream_type = "logs"
@@ -111,8 +111,8 @@ resource "openobserve_dashboard" "from_file" {
 
 ## Three traps
 
-**Casing is inconsistent.** Every key in a panel is camelCase — `tabId`,
-`queryType`, `customQuery`, `aggregationFunction`, `filterType` — *except* the
+**Casing is inconsistent.** Every key in a panel is camelCase (`tabId`,
+`queryType`, `customQuery`, `aggregationFunction`, `filterType`) *except* the
 `fields` object, which is snake_case: `stream_type`, not `streamType`. That is
 how the server defines it.
 
@@ -130,7 +130,7 @@ y_axis_1`, the y axis item needs `alias = "y_axis_1"`.
 
 ## Drift and server-managed fields
 
-The server adds fields to the document it stores — `dashboardId`, `created`, and
+The server adds fields to the document it stores, such as `dashboardId`, `created`, and
 others. Those additions are not drift, and the provider does not report them: as
 long as the stored document still contains everything your configuration asked
 for, your configuration is what stays in state. Change a value the server

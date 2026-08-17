@@ -12,7 +12,7 @@ import (
 // ---------------------------------------------------------------------------
 //
 // The wire format is heavily flattened. An SLO's service level indicator is an
-// adjacently tagged enum — `{"sli_type": "count", "config": {…}}` — and for a
+// adjacently tagged enum, `{"sli_type": "count", "config": {…}}`, and for a
 // count SLI the config is itself adjacently tagged by `mode`. Both tags sit at
 // the level the server expects rather than nested under a wrapper, so the Go
 // types mirror that shape directly.
@@ -93,7 +93,7 @@ type SloAPI struct {
 // "measured as zero" are different answers.
 //
 // The derived figures are all optional because an SLO whose coverage has
-// fallen below the floor is frozen — neither healthy nor breached — and the
+// fallen below the floor is frozen, neither healthy nor breached, and the
 // server reports that by omitting them rather than by sending zeros.
 type SloStatusAPI struct {
 	GroupKey             string   `json:"group_key"`

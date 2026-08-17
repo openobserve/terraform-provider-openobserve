@@ -17,7 +17,7 @@ data "openobserve_slo" "checkout" {
   name = "checkout_availability"
 }
 
-# `status` is null until the first evaluation pass has run — "not yet measured"
+# `status` is null until the first evaluation pass has run. "Not yet measured"
 # and "measured as zero" are different answers, so the provider does not
 # conflate them.
 output "budget_remaining_pct" {
@@ -48,7 +48,7 @@ output "burning_faster_than_budget" {
 - `owner` (String) Objective owner.
 - `sli_type` (String) Indicator type: `count`, `time_slice`, or `alert`.
 - `slice_interval_secs` (Number) Slice width in seconds.
-- `status` (Attributes) Current measurement. Null until the first evaluation pass has run — "not yet measured" and "measured as zero" are different answers. (see [below for nested schema](#nestedatt--status))
+- `status` (Attributes) Current measurement. Null until the first evaluation pass has run. "Not yet measured" and "measured as zero" are different answers. (see [below for nested schema](#nestedatt--status))
 - `tags` (Set of String) Selection tags on the objective.
 - `target` (Number) Target availability as a percentage.
 - `window_secs` (Number) Rolling window in seconds.
@@ -64,7 +64,7 @@ Read-Only:
 - `covered_slices` (Number) Number of slices that produced a measurement.
 - `error_budget_remaining` (Number) Percentage of the error budget still unspent. Goes negative once the budget is overspent, which is deliberate: -80% is what you need to see after burning 180% of the budget.
 - `good` (Number) Good events or slices in the window.
-- `no_data` (Boolean) True when coverage sits below the floor. The objective is then frozen — neither healthy nor breached — and every derived figure below is null.
+- `no_data` (Boolean) True when coverage sits below the floor. The objective is then frozen, neither healthy nor breached, and every derived figure below is null.
 - `sli` (Number) Measured indicator as a percentage. Null while frozen or not yet measured.
 - `time_to_exhaust_secs` (Number) Seconds until the budget is exhausted at the current burn. Null when the burn is at or below neutral, because nothing is being exhausted.
 - `total` (Number) Total events or slices in the window.

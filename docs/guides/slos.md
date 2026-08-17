@@ -30,14 +30,14 @@ resource "openobserve_slo" "checkout_availability" {
 }
 ```
 
-SLOs live in **alert folders** — there is no separate SLO folder type — so
+SLOs live in **alert folders**, and there is no separate SLO folder type, so
 `folder_id` refers to an `openobserve_folder` with `folder_type = "alerts"`.
 
 ## Choosing an indicator
 
 Exactly one indicator block is required. They answer different questions.
 
-### `count_sli` — good events over total events
+### `count_sli`: good events over total events
 
 The natural choice for availability. Three sources, in descending order of
 preference:
@@ -57,7 +57,7 @@ count_sli {
 ```
 
 **`promql`** exists because pre-aggregated counters have no rows for a
-`good_expr` to classify — "good" only exists as arithmetic between series. Use a
+`good_expr` to classify: "good" only exists as arithmetic between series. Use a
 range selector equal to the slice interval, since the evaluator samples at slice
 ends:
 
@@ -75,7 +75,7 @@ cannot be proven to have seen the same instant. It exists for imported
 definitions that cannot be folded into one query. Each query projects
 `slice_start`, every `group_by` column, and exactly one numeric `zo_slo_value`.
 
-### `time_slice_sli` — each slice is good or bad
+### `time_slice_sli`: each slice is good or bad
 
 The natural choice for latency, where you care whether a percentile stayed under
 a bound rather than counting individual events:
@@ -106,12 +106,12 @@ time_slice_sli {
 
 It only changes the meaning of a *successful* query's empty result. A failed
 query still writes nothing and coverage falls, so a search outage freezes the
-objective rather than firing it. Ungrouped objectives only — gap fill cannot see
+objective rather than firing it. Ungrouped objectives only: gap fill cannot see
 a group missing from an entire pass, so a grouped freshness objective would
 freeze instead of firing for exactly the failure it watches for. The provider
 rejects that combination during `plan`.
 
-### `alert_sli` — derived from an alert
+### `alert_sli`: derived from an alert
 
 Slices where the alert was firing count as bad:
 
@@ -153,14 +153,14 @@ output "budget_remaining_pct" {
 
 `status` is null until the first evaluation pass has run. "Not yet measured" and
 "measured as zero" are different answers, and the provider does not conflate
-them — a brand-new objective is not 0% available.
+them. A brand-new objective is not 0% available.
 
 Two fields are worth understanding:
 
 **`coverage`** is the fraction of the window actually measured, from 0 to 1.
 
 **`no_data`** is true when coverage falls below the floor. The objective is then
-**frozen** — neither healthy nor breached — and every derived figure is null.
+**frozen**, neither healthy nor breached, and every derived figure is null.
 That is a third state, and a dashboard that renders it as "0% available" is
 lying. Check it explicitly:
 
@@ -231,12 +231,12 @@ short window must also be at least **twice the SLO's slice interval**, and that
 interval belongs to the objective, so any value guessed here could be rejected.
 A one-slice window has coverage 0 or 1, so a single gap would freeze the alert.
 
-The long window must be 1h–48h and no longer than the SLO window. Both window
+The long window must be between 1h and 48h, and no longer than the SLO window. Both window
 fields are meaningful only for `burn_rate`; setting them on an `error_budget`
 alert is rejected during `plan`, since it would silently do nothing.
 
 ~> Per-group SLO alerting (`multi_alert`) is **not yet supported by
-OpenObserve** — it is rejected with *per-group alerting (multi_alert) is not yet
+OpenObserve**. It is rejected with *per-group alerting (multi_alert) is not yet
 supported for SLO alerts*. Alert on the rollup for now. Per-group alerting does
 work today on aggregation and PromQL alerts; see the [alerting guide](alerting).
 
@@ -252,14 +252,14 @@ work today on aggregation and PromQL alerts; see the [alerting guide](alerting).
 ## Full examples
 
 ```terraform
-# SLOs live in alert folders — there is no separate SLO folder type.
+# SLOs live in alert folders. There is no separate SLO folder type.
 resource "openobserve_folder" "reliability" {
   folder_type = "alerts"
   name        = "Reliability"
 }
 
 # Availability: good requests over total requests, counted in a single scan.
-# This is the form to prefer — one query means the numerator and denominator
+# This is the form to prefer, because one query means the numerator and denominator
 # are provably drawn from the same rows.
 resource "openobserve_slo" "checkout_availability" {
   folder_id   = openobserve_folder.reliability.folder_id
@@ -345,8 +345,8 @@ resource "openobserve_slo" "ingest_freshness" {
   }
 }
 
-# Metrics-native counting. Pre-aggregated counters have no rows to classify —
-# "good" only exists as arithmetic between series — so use a range selector
+# Metrics-native counting. Pre-aggregated counters have no rows to classify,
+# since "good" only exists as arithmetic between series, so use a range selector
 # equal to the slice interval.
 resource "openobserve_slo" "http_success_rate" {
   folder_id = openobserve_folder.reliability.folder_id

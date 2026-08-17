@@ -38,8 +38,8 @@ provider "openobserve" {}
 ## Create a stream
 
 A stream is where data lands. Applying `openobserve_stream` to a name that does
-not exist creates it; applying it to a stream that already exists — because data
-has been ingested into it — adopts that stream and manages its settings.
+not exist creates it. Applying it to a stream that already exists, because data
+has been ingested into it, adopts that stream and manages its settings.
 
 ```hcl
 resource "openobserve_stream" "app_logs" {
@@ -133,7 +133,7 @@ recreate anything.
 
 ## Where to go next
 
-- [Alerting](alerting) — every query type, warning thresholds, and per-group alerts
-- [Service level objectives](slos) — error budgets and burn-rate alerts
-- [Dashboards](dashboards) — panel JSON without the guesswork
-- [Roles and groups](rbac) — permissions, groups, and service accounts
+- [Alerting](alerting): every query type, warning thresholds, and per-group alerts
+- [Service level objectives](slos): error budgets and burn-rate alerts
+- [Dashboards](dashboards): panel JSON without the guesswork
+- [Roles and groups](rbac): permissions, groups, and service accounts
