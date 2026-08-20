@@ -45,7 +45,7 @@ If you are new to the provider, start with the
 [Getting Started](guides/getting-started) guide. The remaining guides cover the
 areas with the most moving parts:
 
-- [Alerting](guides/alerting): templates, destinations, and every alert query type
+- [Alerting](guides/alerting): templates, destinations, every alert query type, and composite alerts
 - [Service level objectives](guides/slos): indicators, error budgets, and burn-rate alerts
 - [Dashboards](guides/dashboards): panel JSON, and how to avoid hand-writing it
 - [Roles and groups](guides/rbac): permissions, groups, and service accounts

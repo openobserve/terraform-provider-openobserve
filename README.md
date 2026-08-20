@@ -96,6 +96,7 @@ export OPENOBSERVE_ORG_ID="default"
 | `openobserve_alert_template`      | Notification message templates                                           |
 | `openobserve_alert_destination`   | Webhook, email, and SNS destinations                                     |
 | `openobserve_alert`               | Scheduled and real-time alerts (SQL, PromQL, aggregation, and SLO)      |
+| `openobserve_composite_alert`     | Alerts that combine other alerts through a boolean expression           |
 | `openobserve_slo`                 | Service level objectives, with error budgets and burn-rate alerting     |
 
 ## Data Sources
@@ -115,6 +116,8 @@ export OPENOBSERVE_ORG_ID="default"
 | `openobserve_alert_template(s)`    | One template (including prebuilt ones), or a listing |
 | `openobserve_alert_destination(s)` | One destination, or a listing                        |
 | `openobserve_alert(s)`             | One alert by ID or name, or a listing                |
+| `openobserve_composite_alert`      | One composite with each child's current state        |
+| `openobserve_composite_alert_references` | Composites that hold a given alert as a child  |
 | `openobserve_slo(s)`               | One objective with its measurement, or a listing     |
 
 † Requires OpenObserve Enterprise with OpenFGA enabled. Against an open-source
@@ -127,7 +130,7 @@ Full reference and guides are on the
 [Terraform Registry](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs):
 
 - [Getting started](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/getting-started)
-- [Alerting](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/alerting): every query type, warning thresholds, simple vs multi-alerts
+- [Alerting](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/alerting): every query type, warning thresholds, simple vs multi-alerts, composite alerts
 - [Service level objectives](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/slos): indicators, error budgets, burn-rate alerts
 - [Dashboards](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/dashboards): panel JSON without the guesswork
 - [Roles and groups](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/rbac)
@@ -148,6 +151,7 @@ terraform import openobserve_group.example             default/sre
 terraform import openobserve_alert_template.example    default/slack
 terraform import openobserve_alert_destination.example default/pagerduty
 terraform import openobserve_alert.example             default/2fXkZ8QlmNbYcV1pR3sT
+terraform import openobserve_composite_alert.example   default/2fXkZ8QlmNbYcV1pR3sT
 terraform import openobserve_slo.example               default/2fXkZ8QlmNbYcV1pR3sT
 ```
 

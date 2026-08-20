@@ -275,6 +275,7 @@ Optional:
 Optional:
 
 - `column` (String) Column the comparison reads.
+- `ignore_case` (Boolean) Compare case-insensitively. Only meaningful for string comparisons.
 - `operator` (String) Comparison operator: `=`, `!=`, `>`, `>=`, `<`, `<=`, `Contains`, or `NotContains`.
 - `value` (String) Value to compare against. A value that parses as a number is sent as a JSON number; anything else is sent as a JSON string.
 
@@ -294,6 +295,7 @@ Required:
 Optional:
 
 - `column` (String) Column the comparison reads.
+- `ignore_case` (Boolean) Compare case-insensitively. Only meaningful for string comparisons.
 - `operator` (String) Comparison operator: `=`, `!=`, `>`, `>=`, `<`, `<=`, `Contains`, or `NotContains`.
 - `value` (String) Value to compare against. A value that parses as a number is sent as a JSON number; anything else is sent as a JSON string.
 

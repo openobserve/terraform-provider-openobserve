@@ -7,15 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`openobserve_composite_alert`**: alerts that fire on a boolean expression
+  over other alerts' current states rather than on a query of their own. "The
+  error rate is high" and "a deploy went out recently" are separate alerts;
+  paging only on both is a composite of them, with no duplicated query and no
+  second evaluation cost. Supports `&&`, `||` and `!` with the usual precedence,
+  between 2 and 10 children, and composites as children one level deep.
+  Real-time alerts are not eligible children, having no scheduled state to read.
+- **`warning_counts_as_firing` and `stale_child_policy`** decide what a child
+  contributes: whether a child at warning counts as firing, and whether a child
+  whose state has gone stale keeps its last value, stops satisfying the
+  expression, or satisfies it. The last is the fail-safe choice for
+  absence-of-heartbeat patterns.
+- **`openobserve_composite_alert` data source**: the composite's configuration
+  together with the state it actually read from each child, including per-child
+  `stale` and `truth`, and its own last `evaluation`. `evaluation` is null until
+  the composite has run once, which is not the same as having evaluated false.
+- **`openobserve_composite_alert_references` data source**: the composites that
+  hold a given alert as a child. The server refuses to delete a referenced
+  alert, so this answers why a destroy was blocked, including for composites
+  created outside Terraform. `hidden_reference_count` reports references
+  permissions hid, so an empty list is not read as "unreferenced".
+- **Plan-time expression checking**: syntax, operand count, and duplicate
+  operands are reported as a diagnostic on the offending line rather than as an
+  apply-time HTTP 400. The provider parses expressions with the same grammar and
+  precedence as the server, and an integration test asserts the two still agree
+  on the canonical form.
+
 ### Fixed
 
+- **`ignore_case` on alert conditions was missing.** The server's condition
+  model carries `column`, `operator`, `value` and `ignore_case`; the provider
+  modelled only the first three, so case-insensitive string comparisons could
+  not be expressed and were silently dropped.
+- **Composite errors are annotated rather than passed through.** A blocked
+  delete now explains the ordering that caused it, and `composite_too_deep`,
+  `composite_cycle`, `child_not_eligible`, `composite_folder_not_found` and the
+  writes-disabled and super-cluster cases each say what to do about it.
 - **Release checksums omitted the Terraform Registry manifest.** The manifest
   was uploaded as a release asset but never listed in the signed `SHA256SUMS`,
   so the Registry refused to ingest a version with *missing SHA256 checksum for
   \[..._manifest.json\]*. `checksum.extra_files` now covers it, matching the
   `release.extra_files` entry that was already there. A
-  `repair-release-checksums` workflow applies the same fix to releases published
-  before this, by re-signing their checksum file without rebuilding any binary.
+  `repair-release-checksums` workflow fixes releases published before this.
 
 ## [1.1.0] - 2026-08-17
 

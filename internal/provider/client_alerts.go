@@ -130,9 +130,10 @@ func (c *Client) DeleteAlertDestination(ctx context.Context, orgID, name string)
 
 // AlertConditionAPI is a single comparison used by PromQL and aggregation alerts.
 type AlertConditionAPI struct {
-	Column   string          `json:"column"`
-	Operator string          `json:"operator"`
-	Value    json.RawMessage `json:"value"`
+	Column     string          `json:"column"`
+	Operator   string          `json:"operator"`
+	Value      json.RawMessage `json:"value"`
+	IgnoreCase bool            `json:"ignore_case,omitempty"`
 }
 
 // AlertAggregationAPI configures aggregation for `custom` alerts.

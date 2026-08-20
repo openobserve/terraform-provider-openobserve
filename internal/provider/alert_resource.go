@@ -113,9 +113,10 @@ type AlertDeduplicationModel struct {
 
 // AlertConditionModel is a single column/operator/value comparison.
 type AlertConditionModel struct {
-	Column   types.String `tfsdk:"column"`
-	Operator types.String `tfsdk:"operator"`
-	Value    types.String `tfsdk:"value"`
+	Column     types.String `tfsdk:"column"`
+	Operator   types.String `tfsdk:"operator"`
+	Value      types.String `tfsdk:"value"`
+	IgnoreCase types.Bool   `tfsdk:"ignore_case"`
 }
 
 // AlertAggregationModel is the aggregation block of a `custom` alert.
@@ -171,6 +172,10 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Optional: !required,
 				Description: "Value to compare against. A value that parses as a number is sent as a JSON number; " +
 					"anything else is sent as a JSON string.",
+			},
+			"ignore_case": schema.BoolAttribute{
+				Optional:    true,
+				Description: "Compare case-insensitively. Only meaningful for string comparisons.",
 			},
 		}
 	}
@@ -803,8 +808,10 @@ func (r *AlertResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	// A composite alert holding this one as a child blocks the delete, so
+	// annotate that refusal rather than passing the bare error code through.
 	if err := r.client.DeleteAlert(ctx, org, state.AlertID.ValueString()); err != nil {
-		resp.Diagnostics.AddError("Error deleting alert", err.Error())
+		resp.Diagnostics.AddError("Error deleting alert", compositeErrorDetail(err))
 	}
 }
 
@@ -967,9 +974,10 @@ func queryConditionFromModel(ctx context.Context, model *AlertQueryConditionMode
 
 func conditionFromModel(model *AlertConditionModel, diags *diag.Diagnostics) AlertConditionAPI {
 	return AlertConditionAPI{
-		Column:   model.Column.ValueString(),
-		Operator: model.Operator.ValueString(),
-		Value:    encodeConditionValue(model.Value.ValueString(), diags),
+		Column:     model.Column.ValueString(),
+		Operator:   model.Operator.ValueString(),
+		Value:      encodeConditionValue(model.Value.ValueString(), diags),
+		IgnoreCase: model.IgnoreCase.ValueBool(),
 	}
 }
 
@@ -1123,6 +1131,10 @@ func queryConditionToModel(ctx context.Context, api *AlertQueryConditionAPI, pri
 			priorSloMultiAlert = prior.SloCondition.MultiAlert
 		}
 	}
+	var priorHavingIgnoreCase types.Bool
+	if prior != nil && prior.Aggregation != nil && prior.Aggregation.Having != nil {
+		priorHavingIgnoreCase = prior.Aggregation.Having.IgnoreCase
+	}
 
 	out := &AlertQueryConditionModel{
 		QueryType:          types.StringValue(api.QueryType),
@@ -1149,10 +1161,15 @@ func queryConditionToModel(ctx context.Context, api *AlertQueryConditionAPI, pri
 	}
 
 	if api.PromQLCondition != nil {
+		var priorPromQLIgnoreCase types.Bool
+		if prior != nil && prior.PromQLCondition != nil {
+			priorPromQLIgnoreCase = prior.PromQLCondition.IgnoreCase
+		}
 		out.PromQLCondition = &AlertConditionModel{
-			Column:   types.StringValue(api.PromQLCondition.Column),
-			Operator: types.StringValue(api.PromQLCondition.Operator),
-			Value:    decodeConditionValue(api.PromQLCondition.Value),
+			Column:     types.StringValue(api.PromQLCondition.Column),
+			Operator:   types.StringValue(api.PromQLCondition.Operator),
+			Value:      decodeConditionValue(api.PromQLCondition.Value),
+			IgnoreCase: boolPreserveNull(priorPromQLIgnoreCase, api.PromQLCondition.IgnoreCase),
 		}
 	}
 
@@ -1163,9 +1180,10 @@ func queryConditionToModel(ctx context.Context, api *AlertQueryConditionAPI, pri
 			WarningValue: float64FromPtr(api.Aggregation.WarningValue),
 			MultiAlert:   boolPreserveNull(priorAggMultiAlert, api.Aggregation.MultiAlert),
 			Having: &AlertConditionModel{
-				Column:   types.StringValue(api.Aggregation.Having.Column),
-				Operator: types.StringValue(api.Aggregation.Having.Operator),
-				Value:    decodeConditionValue(api.Aggregation.Having.Value),
+				Column:     types.StringValue(api.Aggregation.Having.Column),
+				Operator:   types.StringValue(api.Aggregation.Having.Operator),
+				Value:      decodeConditionValue(api.Aggregation.Having.Value),
+				IgnoreCase: boolPreserveNull(priorHavingIgnoreCase, api.Aggregation.Having.IgnoreCase),
 			},
 		}
 	}

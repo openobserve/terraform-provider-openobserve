@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -893,4 +894,238 @@ func TestIntegrationSloAlert(t *testing.T) {
 	if got.QueryCondition.SloCondition.Warning == nil {
 		t.Error("warning threshold did not survive the round trip")
 	}
+}
+
+// TestIntegrationCompositeAlertLifecycle covers the composite path end to end,
+// including the two behaviours that only show up against a live server: the
+// expression is stored canonicalized rather than as sent, and a child cannot be
+// deleted while a composite still references it.
+func TestIntegrationCompositeAlertLifecycle(t *testing.T) {
+	c := integrationClient(t)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+
+	streamName := uniqueName("tf_it_comp_stream")
+	if err := c.CreateStream(ctx, org, "logs", streamName, CreateStreamAPI{}); err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteStream(ctx, org, "logs", streamName) })
+
+	templateName := uniqueName("tf_it_comp_template")
+	err := c.CreateAlertTemplate(ctx, org, AlertTemplateAPI{
+		Name:         templateName,
+		Body:         `{"text":"{alert_name}"}`,
+		TemplateType: "http",
+	})
+	if err != nil {
+		t.Fatalf("CreateAlertTemplate: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteAlertTemplate(ctx, org, templateName) })
+
+	destName := uniqueName("tf_it_comp_dest")
+	err = c.CreateAlertDestination(ctx, org, AlertDestinationAPI{
+		Name:            destName,
+		DestinationType: "http",
+		URL:             "https://example.com/hook",
+		Method:          "post",
+		Template:        &templateName,
+		Emails:          []string{},
+	})
+	if err != nil {
+		t.Fatalf("CreateAlertDestination: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteAlertDestination(ctx, org, destName) })
+
+	// A composite requires its folder to exist; unlike an alert it will not
+	// create the default one on demand.
+	folder, err := c.CreateFolder(ctx, org, "alerts", FolderAPI{Name: uniqueName("tf_it_comp_folder")})
+	if err != nil {
+		t.Fatalf("CreateFolder: %v", err)
+	}
+	folderID := folder.FolderID
+	t.Cleanup(func() { _ = c.DeleteFolder(ctx, org, "alerts", folderID) })
+
+	newChild := func(suffix, predicate string) string {
+		t.Helper()
+		sql := fmt.Sprintf("SELECT count(*) AS total FROM %q WHERE %s", streamName, predicate)
+		id, err := c.CreateAlert(ctx, org, folderID, AlertAPI{
+			Name:         uniqueName("tf-it-comp-" + suffix),
+			StreamType:   "logs",
+			StreamName:   streamName,
+			Destinations: []string{destName},
+			Enabled:      true,
+			QueryCondition: AlertQueryConditionAPI{
+				QueryType: "sql",
+				SQL:       &sql,
+			},
+			TriggerCondition: AlertTriggerConditionAPI{
+				Period: 10, Operator: ">=", Threshold: 1,
+				Frequency: 5, FrequencyType: "minutes", AlignTime: true,
+			},
+		})
+		if err != nil {
+			t.Fatalf("CreateAlert(%s): %v", suffix, err)
+		}
+		return id
+	}
+
+	childA := newChild("a", "level = 'error'")
+	childB := newChild("b", "duration_ms > 1000")
+
+	// Written without the outer parentheses the server canonicalizes to.
+	expression := fmt.Sprintf("{%s} && {%s}", childA, childB)
+	compositeName := uniqueName("tf-it-composite")
+	compositeID, err := c.CreateCompositeAlert(ctx, org, folderID, CompositeAlertWriteAPI{
+		CompositeCondition: CompositeConditionAPI{
+			Expression:            expression,
+			WarningCountsAsFiring: true,
+			StaleChildPolicy:      "treat_as_false",
+		},
+		Name:             compositeName,
+		Description:      "integration test composite",
+		Enabled:          true,
+		Destinations:     []string{destName},
+		TriggerCondition: CompositeTriggerAPI{Silence: 30},
+	})
+	if err != nil {
+		t.Fatalf("CreateCompositeAlert: %v", err)
+	}
+	if compositeID == "" {
+		t.Fatal("CreateCompositeAlert did not return an alert ID")
+	}
+	// Registered before the children so it is torn down first; the children
+	// cannot be deleted while it references them.
+	t.Cleanup(func() {
+		if err := c.DeleteAlert(ctx, org, childB); err != nil {
+			t.Errorf("DeleteAlert(childB): %v", err)
+		}
+	})
+	t.Cleanup(func() {
+		if err := c.DeleteAlert(ctx, org, childA); err != nil {
+			t.Errorf("DeleteAlert(childA): %v", err)
+		}
+	})
+	t.Cleanup(func() {
+		if err := c.DeleteAlert(ctx, org, compositeID); err != nil {
+			t.Errorf("DeleteAlert(composite): %v", err)
+		}
+	})
+
+	composite, err := c.GetCompositeAlert(ctx, org, compositeID)
+	if err != nil {
+		t.Fatalf("GetCompositeAlert: %v", err)
+	}
+	if composite == nil {
+		t.Fatal("GetCompositeAlert returned nothing for a composite that was just created")
+	}
+	if composite.AlertType != "composite" {
+		t.Errorf("alert_type = %q, want composite", composite.AlertType)
+	}
+	if composite.TriggerCondition.Silence != 30 {
+		t.Errorf("silence = %d, want 30", composite.TriggerCondition.Silence)
+	}
+	if composite.CompositeCondition.StaleChildPolicy != "treat_as_false" {
+		t.Errorf("stale_child_policy = %q, want treat_as_false", composite.CompositeCondition.StaleChildPolicy)
+	}
+	if len(composite.Children) != 2 {
+		t.Errorf("got %d children, want 2", len(composite.Children))
+	}
+
+	// The server stores its own spelling. The provider relies on comparing the
+	// two as expressions, so assert both halves of that.
+	if composite.CompositeCondition.Expression == expression {
+		t.Error("expected the server to canonicalize the expression it was sent")
+	}
+	if !compositeExpressionsEquivalent(expression, composite.CompositeCondition.Expression) {
+		t.Errorf("stored expression %q is not equivalent to %q",
+			composite.CompositeCondition.Expression, expression)
+	}
+
+	// A child cannot be deleted out from under a composite that names it.
+	err = c.DeleteAlert(ctx, org, childA)
+	if err == nil {
+		t.Error("deleting a referenced child succeeded; expected the server to refuse it")
+	} else if detail := compositeErrorDetail(err); !strings.Contains(detail, "Destroy the composite first") {
+		t.Errorf("child_referenced error was not annotated: %s", detail)
+	}
+
+	refs, err := c.ListCompositeReferences(ctx, org, childA)
+	if err != nil {
+		t.Fatalf("ListCompositeReferences: %v", err)
+	}
+	if refs == nil || len(refs.References) != 1 || refs.References[0].AlertID != compositeID {
+		t.Errorf("references = %+v, want exactly the composite %q", refs, compositeID)
+	}
+
+	// Update: swap the operator and disable it.
+	updated := fmt.Sprintf("{%s} || {%s}", childA, childB)
+	err = c.UpdateCompositeAlert(ctx, org, compositeID, CompositeAlertWriteAPI{
+		CompositeCondition: CompositeConditionAPI{
+			Expression:            updated,
+			WarningCountsAsFiring: false,
+			StaleChildPolicy:      "use_last_state",
+		},
+		Name:             compositeName,
+		Description:      "integration test composite",
+		Enabled:          false,
+		Destinations:     []string{destName},
+		TriggerCondition: CompositeTriggerAPI{Silence: 45},
+	})
+	if err != nil {
+		t.Fatalf("UpdateCompositeAlert: %v", err)
+	}
+
+	composite, err = c.GetCompositeAlert(ctx, org, compositeID)
+	if err != nil {
+		t.Fatalf("GetCompositeAlert after update: %v", err)
+	}
+	if composite.Enabled {
+		t.Error("composite is still enabled after being updated to disabled")
+	}
+	if composite.TriggerCondition.Silence != 45 {
+		t.Errorf("silence after update = %d, want 45", composite.TriggerCondition.Silence)
+	}
+	if !compositeExpressionsEquivalent(updated, composite.CompositeCondition.Expression) {
+		t.Errorf("expression after update = %q, want an equivalent of %q",
+			composite.CompositeCondition.Expression, updated)
+	}
+	if composite.CompositeCondition.WarningCountsAsFiring {
+		t.Error("warning_counts_as_firing is still true after being updated to false")
+	}
+
+	// The validate endpoint reports the canonical form without persisting.
+	validation, err := c.ValidateCompositeExpression(ctx, org, CompositeConditionAPI{
+		Expression:            expression,
+		WarningCountsAsFiring: true,
+		StaleChildPolicy:      "use_last_state",
+	}, compositeID)
+	if err != nil {
+		t.Fatalf("ValidateCompositeExpression: %v", err)
+	}
+	if !validation.Valid {
+		t.Error("a valid expression was reported invalid")
+	}
+	if validation.CanonicalExpression == nil {
+		t.Fatal("validate returned no canonical expression")
+	}
+	if got, want := *validation.CanonicalExpression, canonicalCompositeExpressionOf(t, expression); got != want {
+		t.Errorf("server canonical form = %q, provider computed %q; the provider's parser has drifted", got, want)
+	}
+
+	// Reading a composite through the ordinary alert accessor should not
+	// silently produce a half-populated alert.
+	if _, err := c.GetCompositeAlert(ctx, org, childA); err == nil {
+		t.Error("GetCompositeAlert on an ordinary alert should report the type mismatch")
+	}
+}
+
+// canonicalCompositeExpressionOf is the provider's own canonical form, used to
+// assert it still matches the server's.
+func canonicalCompositeExpressionOf(t *testing.T, expression string) string {
+	t.Helper()
+	canonical, _, err := validateCompositeExpression(expression)
+	if err != nil {
+		t.Fatalf("validateCompositeExpression(%q): %v", expression, err)
+	}
+	return canonical
 }
