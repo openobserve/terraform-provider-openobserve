@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Release checksums omitted the Terraform Registry manifest.** The manifest
+  was uploaded as a release asset but never listed in the signed `SHA256SUMS`,
+  so the Registry refused to ingest a version with *missing SHA256 checksum for
+  \[..._manifest.json\]*. `checksum.extra_files` now covers it, matching the
+  `release.extra_files` entry that was already there. A
+  `repair-release-checksums` workflow applies the same fix to releases published
+  before this, by re-signing their checksum file without rebuilding any binary.
+
 ## [1.1.0] - 2026-08-17
 
 ### Added

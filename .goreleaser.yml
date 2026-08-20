@@ -39,6 +39,14 @@ archives:
 checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_SHA256SUMS"
   algorithm: sha256
+  extra_files:
+    # The Registry refuses to ingest a release unless every declared asset is
+    # covered by the signed checksum file, and it counts the manifest as one.
+    # Uploading the manifest without a SHA256SUMS entry fails ingestion with
+    # "missing SHA256 checksum for [..._manifest.json]", so this glob must stay
+    # in step with the identical one under `release.extra_files` below.
+    - glob: terraform-registry-manifest.json
+      name_template: "{{ .ProjectName }}_{{ .Version }}_manifest.json"
 
 signs:
   - artifacts: checksum

@@ -1,0 +1,113 @@
+name: Repair release checksums
+
+# One-shot repair for releases published before the `checksum.extra_files`
+# entry was added to .goreleaser.yml. Those releases uploaded the registry
+# manifest as an asset but never listed it in the signed SHA256SUMS file, so
+# the Terraform Registry rejected them with:
+#
+#   Could not find all required assets for this release yet:
+#   missing SHA256 checksum for ["terraform-provider-openobserve_X.Y.Z_manifest.json"]
+#
+# This deliberately does not rebuild any binary. It appends the manifest line
+# to the existing SHA256SUMS, re-signs it with the release key, and replaces
+# only those two assets. The provider zips, and therefore the checksums users
+# may already have pinned, are left untouched.
+#
+# Releases cut after the .goreleaser.yml fix do not need this. It is kept
+# because it is idempotent: running it against an already-correct release
+# reports "already present" and exits without changing anything.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to repair (for example v1.0.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    name: Repair ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the published checksum and manifest assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p repair && cd repair
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" \
+            -p '*_SHA256SUMS' -p '*_manifest.json'
+          ls -l
+
+      - name: Add the manifest to the checksum file
+        id: patch
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          cd repair
+          version="${TAG#v}"
+          sums="terraform-provider-openobserve_${version}_SHA256SUMS"
+          manifest="terraform-provider-openobserve_${version}_manifest.json"
+
+          if [ ! -f "$manifest" ]; then
+            echo "::error::$manifest is not attached to $TAG; re-run the release instead."
+            exit 1
+          fi
+
+          if grep -q "  ${manifest}\$" "$sums"; then
+            echo "already present; nothing to repair"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Match GoReleaser's own output: "<sha256>  <name>", sorted by name.
+          sum=$(sha256sum "$manifest" | awk '{print $1}')
+          printf '%s  %s\n' "$sum" "$manifest" >> "$sums"
+          LC_ALL=C sort -k2 -o "$sums" "$sums"
+          cat "$sums"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Import GPG key
+        if: steps.patch.outputs.changed == 'true'
+        id: import_gpg
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.PASSPHRASE }}
+
+      - name: Re-sign the checksum file
+        if: steps.patch.outputs.changed == 'true'
+        env:
+          TAG: ${{ inputs.tag }}
+          GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
+        run: |
+          set -euo pipefail
+          cd repair
+          version="${TAG#v}"
+          sums="terraform-provider-openobserve_${version}_SHA256SUMS"
+          rm -f "${sums}.sig"
+          gpg --batch --local-user "$GPG_FINGERPRINT" \
+            --output "${sums}.sig" --detach-sign "$sums"
+          gpg --verify "${sums}.sig" "$sums"
+
+      - name: Replace the checksum assets
+        if: steps.patch.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          cd repair
+          version="${TAG#v}"
+          sums="terraform-provider-openobserve_${version}_SHA256SUMS"
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" \
+            --clobber "$sums" "${sums}.sig"
+          echo "Repaired $TAG. Re-sync the version from the Terraform Registry provider page."
