@@ -1,0 +1,7 @@
+# Local Terraform state from running the examples. Nothing here should be
+# committed: the examples are meant to be applied against a throwaway server.
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+tfplan
