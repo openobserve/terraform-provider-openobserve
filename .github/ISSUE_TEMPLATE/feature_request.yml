@@ -1,0 +1,109 @@
+name: Feature request
+description: A resource, data source, or attribute the provider does not cover yet.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting this.
+
+        The most useful requests describe what you are trying to accomplish
+        rather than only the attribute you expect to exist. OpenObserve's API is
+        not uniformly shaped, and the right Terraform surface is often not a
+        direct translation of the endpoint.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I checked the [provider documentation](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs) and this is not already supported.
+          required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of change is this
+      options:
+        - A new resource
+        - A new data source
+        - A new attribute on an existing resource or data source
+        - A change to how an existing attribute behaves
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: |
+        The goal, not the mechanism. "I need every alert in a folder to page a
+        different destination per environment" tells us more than "add a field
+        called destination_map".
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like the configuration to look like
+      description: |
+        A sketch is fine, and does not need to be valid HCL. Seeing the shape
+        you have in mind is often the fastest way to spot a mismatch with how
+        the API actually behaves.
+      render: terraform
+      placeholder: |
+        resource "openobserve_something" "example" {
+          name = "example"
+
+          new_block {
+            field = "value"
+          }
+        }
+
+  - type: input
+    id: api
+    attributes:
+      label: Relevant API endpoint
+      description: |
+        Optional, and it speeds things up considerably. If you know which
+        OpenObserve endpoint backs this, naming it saves a search.
+      placeholder: "POST /api/v2/{org_id}/alerts/..."
+
+  - type: input
+    id: openobserve_version
+    attributes:
+      label: OpenObserve version
+      description: |
+        Which version supports the feature. Some capabilities are recent, and
+        the provider cannot expose what a given server does not accept.
+      placeholder: "v0.15.0"
+
+  - type: dropdown
+    id: edition
+    attributes:
+      label: Is this Enterprise only
+      options:
+        - "No, or not sure"
+        - "Yes, it needs Enterprise"
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: How you are working around it today
+      description: |
+        A raw API call, a null_resource with a local-exec, doing it by hand in
+        the UI, or living without it. This helps judge how much the gap costs.
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I would be willing to open a pull request for this.

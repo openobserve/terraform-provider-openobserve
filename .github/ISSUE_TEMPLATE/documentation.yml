@@ -1,0 +1,71 @@
+name: Documentation
+description: Something in the docs is wrong, missing, or misleading.
+title: "[Docs]: "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Documentation that is wrong is worse than documentation that is absent,
+        so these are worth reporting even when small.
+
+        Note that the Registry pages are generated from the provider's schema
+        descriptions and the files under `templates/`, so a fix usually belongs
+        in the Go source or a template rather than in `docs/`, which is
+        regenerated.
+
+  - type: dropdown
+    id: location
+    attributes:
+      label: Where
+      options:
+        - Terraform Registry, a resource or data source page
+        - Terraform Registry, a guide
+        - OpenTofu Registry
+        - README
+        - The Claude skill under skills/
+        - An example under examples/
+        - Somewhere else
+    validations:
+      required: true
+
+  - type: input
+    id: page
+    attributes:
+      label: Link or path
+      placeholder: "https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/resources/alert"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is wrong with it
+      options:
+        - "It is factually incorrect: following it does not work"
+        - It is missing something that is not documented anywhere
+        - It is unclear or ambiguous
+        - An example does not apply cleanly
+        - A broken link or a formatting problem
+    validations:
+      required: true
+
+  - type: textarea
+    id: detail
+    attributes:
+      label: What it says, and what it should say
+      description: |
+        Quoting the current wording helps, since the pages change between
+        releases.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: What actually happened
+      description: |
+        For a documented behaviour that does not hold, the error or the observed
+        result. This is the difference between a wording change and a real bug
+        hiding behind a docs report.
+      render: shell

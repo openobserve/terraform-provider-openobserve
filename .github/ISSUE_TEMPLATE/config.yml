@@ -1,0 +1,28 @@
+# Blank issues stay enabled. The forms above cover the common cases, but a
+# report that does not fit one of them is better filed loosely than not at all.
+blank_issues_enabled: true
+
+contact_links:
+  - name: OpenObserve server bug or feature
+    url: https://github.com/openobserve/openobserve/issues
+    about: >-
+      For behaviour of OpenObserve itself rather than the Terraform provider.
+      If an error comes back from the API and the same request fails with curl,
+      it belongs upstream. Linking both issues helps.
+
+  - name: Provider documentation
+    url: https://registry.terraform.io/providers/openobserve/openobserve/latest/docs
+    about: >-
+      Reference for every resource and data source, plus guides on alerting,
+      SLOs, dashboards, and roles and groups.
+
+  - name: OpenObserve documentation
+    url: https://openobserve.ai/docs/
+    about: >-
+      For questions about OpenObserve concepts, query syntax, or deployment,
+      rather than about managing it with Terraform.
+
+  - name: OpenTofu Registry
+    url: https://search.opentofu.org/provider/openobserve/openobserve/latest
+    about: >-
+      The same provider, published for OpenTofu at the same source address.

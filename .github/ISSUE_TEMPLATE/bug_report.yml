@@ -1,0 +1,196 @@
+name: Bug report
+description: Something the provider does that it should not, or does not do that it should.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this.
+
+        The most useful bug reports carry a configuration small enough to apply
+        as-is and the full error text including the API response body. With
+        those two, most problems are reproducible in minutes rather than after
+        a round of questions.
+
+        **Before filing:** many apparent provider bugs are the server rejecting
+        a valid-looking request. If the error text contains an OpenObserve API
+        message, it is worth a quick look at
+        [Server errors, decoded](https://github.com/openobserve/terraform-provider-openobserve/blob/main/skills/openobserve-terraform/references/errors.md),
+        which lists the common ones with fixes.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I reproduced this on the latest provider release, or I have said below which version I am pinned to and why.
+          required: true
+
+  - type: input
+    id: provider_version
+    attributes:
+      label: Provider version
+      description: From `.terraform.lock.hcl`, or run `terraform version`.
+      placeholder: "1.2.0"
+    validations:
+      required: true
+
+  - type: input
+    id: terraform_version
+    attributes:
+      label: Terraform or OpenTofu version
+      description: Output of `terraform version` or `tofu version`. Please say which one.
+      placeholder: "Terraform v1.9.5, or OpenTofu v1.8.2"
+    validations:
+      required: true
+
+  - type: input
+    id: openobserve_version
+    attributes:
+      label: OpenObserve version
+      description: |
+        Shown in the UI under Management, or from `GET /healthz` on some builds.
+        Server behaviour changes between releases, so this often decides whether
+        something is a provider bug or an upstream one.
+      placeholder: "v0.15.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: edition
+    attributes:
+      label: Edition
+      description: |
+        Roles, groups and the permission resource list need Enterprise with
+        OpenFGA enabled. Everything else, including SLOs, works on both.
+      options:
+        - Open source
+        - Enterprise with OpenFGA enabled (ZO_OPENFGA_ENABLED=true)
+        - Enterprise without OpenFGA
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: resource
+    attributes:
+      label: Affected resource or data source
+      description: One per issue where possible. Use the full type name.
+      placeholder: "openobserve_alert, or data.openobserve_slos"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: lifecycle_step
+    attributes:
+      label: Where it goes wrong
+      description: |
+        This narrows things down more than anything else in the form. A
+        configuration that applies but will not settle on the second plan is a
+        very different bug from one that fails outright.
+      options:
+        - "terraform plan, before anything is sent"
+        - "terraform apply, the first time"
+        - "terraform apply a second time: it reports changes when nothing changed"
+        - "terraform plan after a successful apply: it never settles"
+        - "terraform import, or the first plan after an import"
+        - "terraform destroy"
+        - "Reading a data source"
+        - "Something else"
+    validations:
+      required: true
+
+  - type: textarea
+    id: configuration
+    attributes:
+      label: Terraform configuration
+      description: |
+        The smallest configuration that reproduces this. Please remove anything
+        unrelated, and redact endpoints, tokens and passwords.
+
+        This is automatically formatted as HCL; no need for backticks.
+      render: terraform
+      placeholder: |
+        resource "openobserve_alert" "example" {
+          name         = "high-error-rate"
+          stream_type  = "logs"
+          stream_name  = "app_logs"
+          destinations = ["slack"]
+
+          query_condition {
+            type = "sql"
+            sql  = "SELECT count(_timestamp) AS total FROM \"app_logs\""
+          }
+
+          trigger_condition {
+            period    = 15
+            operator  = ">="
+            threshold = 100
+            frequency = 5
+          }
+        }
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: |
+        The full error, not just the summary line. If it contains an OpenObserve
+        API response, please include the whole body: the `code` and `message`
+        fields are usually what identifies the cause.
+
+        For a plan that will not settle, the relevant part is the diff showing
+        which attribute keeps changing.
+      render: shell
+      placeholder: |
+        Error: Error creating alert
+
+          with openobserve_alert.example,
+          on main.tf line 1, in resource "openobserve_alert" "example":
+           1: resource "openobserve_alert" "example" {
+
+        OpenObserve API error (HTTP 400): {"code":400,"message":"..."}
+    validations:
+      required: true
+
+  - type: textarea
+    id: debug_log
+    attributes:
+      label: Debug log
+      description: |
+        Optional, and genuinely helpful when the error is unclear.
+
+        ```
+        TF_LOG=DEBUG terraform apply 2>&1 | tee tf-debug.log
+        ```
+
+        Please attach the file rather than pasting it, and check it for
+        credentials first. Request and response bodies appear in it.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: |
+        Workarounds you found, whether it worked on an earlier version, whether
+        the object was created in the UI first, or anything else that seems
+        relevant.
