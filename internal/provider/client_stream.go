@@ -280,8 +280,32 @@ func (c *Client) UpdateStreamSettings(ctx context.Context, orgID, streamType, na
 // Stream deletion is asynchronous: a stream already queued for deletion answers
 // with "is being deleted" rather than 404. That is the outcome the caller asked
 // for, so it counts as success and a retried destroy does not fail.
+//
+// The name is resolved against the server before deleting, because OpenObserve
+// normalizes stream names on some endpoints and not others. Creating
+// `live-test-stream` stores `live_test_stream`, and every read path
+// (schema, settings, update) normalizes the name it is given, so the raw name
+// keeps working. The delete handler does not normalize, so deleting by the raw
+// name answers 404 for a stream that plainly exists.
+//
+// Tolerating that 404 as "already gone" is what made this silent: a destroy
+// reported success and left the stream and its data in place. Resolving the
+// name first means a 404 is only ever tolerated once a read has confirmed the
+// stream really is absent. See openobserve/terraform-provider-openobserve#1.
 func (c *Client) DeleteStream(ctx context.Context, orgID, streamType, name string) error {
-	path := fmt.Sprintf("/api/%s/streams/%s?type=%s", pathEscape(orgID), pathEscape(name), pathEscape(streamType))
+	target := name
+	switch stream, err := c.GetStream(ctx, orgID, streamType, name); {
+	case err != nil:
+		return err
+	case stream == nil:
+		// Genuinely absent through the normalizing read path, so there is
+		// nothing to delete and a retried destroy stays successful.
+		return nil
+	case stream.Name != "":
+		target = stream.Name
+	}
+
+	path := fmt.Sprintf("/api/%s/streams/%s?type=%s", pathEscape(orgID), pathEscape(target), pathEscape(streamType))
 	err := c.deleteIgnoreMissing(ctx, path)
 	if err != nil && isBeingDeleted(err) {
 		return nil

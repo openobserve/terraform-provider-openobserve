@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -89,7 +90,7 @@ type AlertQueryConditionModel struct {
 	SloCondition       *AlertSloConditionModel `tfsdk:"slo_condition"`
 	VRLFunction        types.String            `tfsdk:"vrl_function"`
 	SearchEventType    types.String            `tfsdk:"search_event_type"`
-	MultiTimeRange     []AlertTimeOffsetModel  `tfsdk:"multi_time_range"`
+	MultiTimeRange     types.List              `tfsdk:"multi_time_range"`
 }
 
 // AlertSloConditionModel is the slo_condition block of an SLO alert.
@@ -606,7 +607,7 @@ func (r *AlertResource) ValidateConfig(ctx context.Context, req resource.Validat
 		// alert has none, so setting one means the author expected a behaviour
 		// they will not get.
 		if config.TriggerCondition != nil {
-			if !config.TriggerCondition.Threshold.IsNull() {
+			if knownAndSet(config.TriggerCondition.Threshold) {
 				resp.Diagnostics.AddAttributeError(
 					path.Root("trigger_condition").AtName("threshold"),
 					"SLO alerts have no count gate",
@@ -614,7 +615,7 @@ func (r *AlertResource) ValidateConfig(ctx context.Context, req resource.Validat
 						"`trigger_condition.threshold`. Remove the threshold.",
 				)
 			}
-			if !config.TriggerCondition.Operator.IsNull() {
+			if knownAndSet(config.TriggerCondition.Operator) {
 				resp.Diagnostics.AddAttributeError(
 					path.Root("trigger_condition").AtName("operator"),
 					"SLO alerts have no count gate",
@@ -627,8 +628,8 @@ func (r *AlertResource) ValidateConfig(ctx context.Context, req resource.Validat
 		// The two windows only exist for burn-rate alerts; setting them on a
 		// budget alert means the author expected a behaviour they will not get.
 		if config.QueryCondition.SloCondition.Kind.ValueString() == "error_budget" &&
-			(!config.QueryCondition.SloCondition.LongWindowSecs.IsNull() ||
-				!config.QueryCondition.SloCondition.ShortWindowSecs.IsNull()) {
+			(knownAndSet(config.QueryCondition.SloCondition.LongWindowSecs) ||
+				knownAndSet(config.QueryCondition.SloCondition.ShortWindowSecs)) {
 			resp.Diagnostics.AddAttributeError(
 				path.Root("query_condition").AtName("slo_condition"),
 				"Windows apply only to burn-rate alerts",
@@ -639,7 +640,7 @@ func (r *AlertResource) ValidateConfig(ctx context.Context, req resource.Validat
 	}
 
 	if config.QueryCondition.Aggregation != nil && config.TriggerCondition != nil &&
-		!config.TriggerCondition.WarningThreshold.IsNull() {
+		knownAndSet(config.TriggerCondition.WarningThreshold) {
 		resp.Diagnostics.AddAttributeError(
 			path.Root("trigger_condition").AtName("warning_threshold"),
 			"warning_threshold is not supported on aggregation alerts",
@@ -653,7 +654,8 @@ func (r *AlertResource) ValidateConfig(ctx context.Context, req resource.Validat
 		// the short one: the minimum is two slice intervals, and the slice
 		// interval belongs to the SLO, so any value guessed here could be
 		// rejected.
-		if sc.LongWindowSecs.IsNull() || sc.ShortWindowSecs.IsNull() {
+		if (sc.LongWindowSecs.IsNull() && !sc.LongWindowSecs.IsUnknown()) ||
+			(sc.ShortWindowSecs.IsNull() && !sc.ShortWindowSecs.IsUnknown()) {
 			resp.Diagnostics.AddAttributeError(
 				path.Root("query_condition").AtName("slo_condition"),
 				"Burn-rate alerts need both windows",
@@ -667,7 +669,7 @@ func (r *AlertResource) ValidateConfig(ctx context.Context, req resource.Validat
 
 	if config.TriggerCondition != nil &&
 		config.TriggerCondition.FrequencyType.ValueString() == "cron" &&
-		config.TriggerCondition.Cron.IsNull() {
+		config.TriggerCondition.Cron.IsNull() && !config.TriggerCondition.Cron.IsUnknown() {
 		resp.Diagnostics.AddAttributeError(
 			path.Root("trigger_condition").AtName("cron"),
 			"Missing cron",
@@ -966,8 +968,22 @@ func queryConditionFromModel(ctx context.Context, model *AlertQueryConditionMode
 		}
 	}
 
-	for _, tr := range model.MultiTimeRange {
-		out.MultiTimeRange = append(out.MultiTimeRange, AlertCompareHistoricData{Offset: tr.Offset.ValueString()})
+	// multi_time_range is a types.List rather than a Go slice because a slice
+	// cannot represent an unknown value, and Terraform hands the provider an
+	// unknown list whenever a `dynamic "multi_time_range"` block's for_each
+	// comes from a variable. Decoding into a slice fails config decode outright
+	// with "Received unknown value, however the target type cannot handle
+	// unknown values", before ValidateConfig ever runs. That is
+	// openobserve/terraform-provider-openobserve#2.
+	//
+	// An unknown list contributes nothing here: the values resolve before
+	// apply, and the write path only ever runs with a concrete plan.
+	if knownAndSet(model.MultiTimeRange) {
+		var ranges []AlertTimeOffsetModel
+		diags.Append(model.MultiTimeRange.ElementsAs(ctx, &ranges, false)...)
+		for _, tr := range ranges {
+			out.MultiTimeRange = append(out.MultiTimeRange, AlertCompareHistoricData{Offset: tr.Offset.ValueString()})
+		}
 	}
 	return out
 }
@@ -1188,10 +1204,31 @@ func queryConditionToModel(ctx context.Context, api *AlertQueryConditionAPI, pri
 		}
 	}
 
-	for _, tr := range api.MultiTimeRange {
-		out.MultiTimeRange = append(out.MultiTimeRange, AlertTimeOffsetModel{Offset: types.StringValue(tr.Offset)})
-	}
+	out.MultiTimeRange = multiTimeRangeToList(ctx, api.MultiTimeRange, diags)
 	return out
+}
+
+// multiTimeRangeAttrTypes describes one multi_time_range element.
+var multiTimeRangeAttrTypes = map[string]attr.Type{"offset": types.StringType}
+
+// multiTimeRangeToList renders the API's offsets as a list value, using a null
+// list rather than an empty one when the server reports none. An empty list
+// would differ from the null Terraform holds for a block that was never
+// written, and would show as drift on every plan.
+func multiTimeRangeToList(ctx context.Context, api []AlertCompareHistoricData, diags *diag.Diagnostics) types.List {
+	elemType := types.ObjectType{AttrTypes: multiTimeRangeAttrTypes}
+	if len(api) == 0 {
+		return types.ListNull(elemType)
+	}
+	values := make([]attr.Value, 0, len(api))
+	for _, tr := range api {
+		values = append(values, objectValue(multiTimeRangeAttrTypes, map[string]attr.Value{
+			"offset": types.StringValue(tr.Offset),
+		}, diags))
+	}
+	list, d := types.ListValue(elemType, values)
+	diags.Append(d...)
+	return list
 }
 
 func triggerConditionToModel(api *AlertTriggerConditionAPI) *AlertTriggerConditionModel {

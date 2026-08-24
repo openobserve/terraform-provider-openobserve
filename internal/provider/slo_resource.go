@@ -387,43 +387,60 @@ func (r *SloResource) ValidateConfig(ctx context.Context, req resource.ValidateC
 		}
 	}
 
-	indicators := 0
-	if config.CountSLI != nil {
-		indicators++
-	}
-	if config.TimeSliceSLI != nil {
-		indicators++
-	}
-	if config.AlertSLI != nil {
-		indicators++
+	// Read the indicators from the raw configuration rather than from the
+	// decoded pointers. A `dynamic` block that produced no iterations still
+	// arrives as a present object full of unknowns, so a nil check reports
+	// indicators the author never wrote. See blockPresence in helpers.go.
+	countPresence := nestedBlockPresence(ctx, req.Config, path.Root("count_sli"))
+	timeSlicePresence := nestedBlockPresence(ctx, req.Config, path.Root("time_slice_sli"))
+	alertPresence := nestedBlockPresence(ctx, req.Config, path.Root("alert_sli"))
+
+	indicators, undecided := 0, 0
+	for _, p := range []blockPresence{countPresence, timeSlicePresence, alertPresence} {
+		switch p {
+		case blockConfigured:
+			indicators++
+		case blockIndeterminate:
+			undecided++
+		}
 	}
 
-	switch indicators {
-	case 0:
-		resp.Diagnostics.AddError(
-			"Missing service level indicator",
-			"Exactly one of `count_sli`, `time_slice_sli`, or `alert_sli` must be set.",
-		)
-		return
-	case 1:
-	default:
+	switch {
+	case indicators > 1:
 		resp.Diagnostics.AddError(
 			"Conflicting service level indicators",
 			"Exactly one of `count_sli`, `time_slice_sli`, or `alert_sli` may be set.",
 		)
 		return
+	case indicators == 0 && undecided == 0:
+		resp.Diagnostics.AddError(
+			"Missing service level indicator",
+			"Exactly one of `count_sli`, `time_slice_sli`, or `alert_sli` must be set.",
+		)
+		return
+	case undecided > 0:
+		// Something here is still unknown, so which indicators were written
+		// cannot be decided. The server enforces the same rule on apply.
+		return
 	}
 
-	if config.CountSLI != nil {
-		sources := 0
-		if config.CountSLI.SingleQuery != nil {
-			sources++
+	if countPresence == blockConfigured && config.CountSLI != nil {
+		sourcePaths := map[string]blockPresence{
+			"single_query": nestedBlockPresence(ctx, req.Config, path.Root("count_sli").AtName("single_query")),
+			"dual_query":   nestedBlockPresence(ctx, req.Config, path.Root("count_sli").AtName("dual_query")),
+			"promql":       nestedBlockPresence(ctx, req.Config, path.Root("count_sli").AtName("promql")),
 		}
-		if config.CountSLI.DualQuery != nil {
-			sources++
+		sources, undecidedSources := 0, 0
+		for _, p := range sourcePaths {
+			switch p {
+			case blockConfigured:
+				sources++
+			case blockIndeterminate:
+				undecidedSources++
+			}
 		}
-		if config.CountSLI.PromQL != nil {
-			sources++
+		if undecidedSources > 0 {
+			return
 		}
 		if sources != 1 {
 			resp.Diagnostics.AddError(
@@ -432,12 +449,12 @@ func (r *SloResource) ValidateConfig(ctx context.Context, req resource.ValidateC
 			)
 		}
 
-		if sq := config.CountSLI.SingleQuery; sq != nil {
+		if sq := config.CountSLI.SingleQuery; sq != nil && sourcePaths["single_query"] == blockConfigured {
 			requireSloAttr(resp, sq.Stream, "count_sli", "single_query", "stream")
 			requireSloAttr(resp, sq.StreamType, "count_sli", "single_query", "stream_type")
 			requireSloAttr(resp, sq.GoodExpr, "count_sli", "single_query", "good_expr")
 		}
-		if dq := config.CountSLI.DualQuery; dq != nil {
+		if dq := config.CountSLI.DualQuery; dq != nil && sourcePaths["dual_query"] == blockConfigured {
 			if dq.Good == nil || dq.Total == nil {
 				resp.Diagnostics.AddError(
 					"Incomplete dual_query source",
@@ -445,13 +462,13 @@ func (r *SloResource) ValidateConfig(ctx context.Context, req resource.ValidateC
 				)
 			}
 		}
-		if pq := config.CountSLI.PromQL; pq != nil {
+		if pq := config.CountSLI.PromQL; pq != nil && sourcePaths["promql"] == blockConfigured {
 			requireSloAttr(resp, pq.Good, "count_sli", "promql", "good")
 			requireSloAttr(resp, pq.Total, "count_sli", "promql", "total")
 		}
 	}
 
-	if ts := config.TimeSliceSLI; ts != nil {
+	if ts := config.TimeSliceSLI; ts != nil && timeSlicePresence == blockConfigured {
 		requireSloAttr(resp, ts.Stream, "time_slice_sli", "", "stream")
 		requireSloAttr(resp, ts.StreamType, "time_slice_sli", "", "stream_type")
 		requireSloAttr(resp, ts.QueryLanguage, "time_slice_sli", "", "query_language")
@@ -465,14 +482,15 @@ func (r *SloResource) ValidateConfig(ctx context.Context, req resource.ValidateC
 		}
 	}
 
-	if a := config.AlertSLI; a != nil {
+	if a := config.AlertSLI; a != nil && alertPresence == blockConfigured {
 		requireSloAttr(resp, a.AlertID, "alert_sli", "", "alert_id")
 	}
 
 	// A grouped freshness objective could never fire for the failure it
 	// watches, because gap fill cannot see a group absent from the whole pass.
-	if config.TimeSliceSLI != nil && config.TimeSliceSLI.AbsentIsBad.ValueBool() &&
-		!config.GroupBy.IsNull() && len(config.GroupBy.Elements()) > 0 {
+	if timeSlicePresence == blockConfigured && config.TimeSliceSLI != nil &&
+		knownAndSet(config.TimeSliceSLI.AbsentIsBad) && config.TimeSliceSLI.AbsentIsBad.ValueBool() &&
+		knownAndSet(config.GroupBy) && len(config.GroupBy.Elements()) > 0 {
 		resp.Diagnostics.AddAttributeError(
 			path.Root("time_slice_sli").AtName("absent_is_bad"),
 			"absent_is_bad cannot be combined with group_by",

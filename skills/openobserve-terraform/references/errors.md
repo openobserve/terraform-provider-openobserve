@@ -12,6 +12,7 @@ distinctive fragment; the surrounding text varies by version.
 | `partition key [x] cannot also be a secondary index field` | Field in both lists | Keep `partition_keys` and `index_fields` disjoint |
 | `stream settings could not be found` | Settings PUT against a stream that does not exist | Create the stream first |
 | `Stream <name> not found` (404) | Creating an alert on a stream that does not exist | Declare the stream, or wait for ingestion to create it |
+| `stream not found` (404) on a DELETE for a stream that exists | The delete endpoint does not normalize the name, unlike every other stream endpoint | Delete by the stored name, which is `effective_name`. The provider resolves this for you |
 
 ## Dashboards
 

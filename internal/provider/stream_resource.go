@@ -42,6 +42,7 @@ type StreamResourceModel struct {
 	ID                          types.String `tfsdk:"id"`
 	OrgID                       types.String `tfsdk:"org_id"`
 	Name                        types.String `tfsdk:"name"`
+	EffectiveName               types.String `tfsdk:"effective_name"`
 	StreamType                  types.String `tfsdk:"stream_type"`
 	DataRetention               types.Int64  `tfsdk:"data_retention"`
 	MaxQueryRange               types.Int64  `tfsdk:"max_query_range"`
@@ -107,9 +108,18 @@ func (r *StreamResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				},
 			},
 			"name": schema.StringAttribute{
-				Required:      true,
-				Description:   "Stream name.",
+				Required: true,
+				Description: "Stream name.\n\n" +
+					"OpenObserve normalizes this: every character outside `[a-zA-Z0-9_:]` is replaced with an " +
+					"underscore, so a stream created as `app-logs` is stored as `app_logs`. The stored name is " +
+					"reported in `effective_name`. Naming the stream in its normalized form avoids the surprise.",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+			},
+			"effective_name": schema.StringAttribute{
+				Computed: true,
+				Description: "The name OpenObserve actually stored, which differs from `name` when the server " +
+					"normalized it. Queries, dashboards and alerts must reference this name rather than the " +
+					"configured one.",
 			},
 			"stream_type": schema.StringAttribute{
 				Required:      true,
@@ -557,6 +567,12 @@ func (r *StreamResource) readInto(ctx context.Context, org, streamType, name str
 }
 
 func (r *StreamResource) applyStreamToModel(ctx context.Context, stream *StreamAPI, model *StreamResourceModel, diags *diag.Diagnostics) {
+	// What the server actually called the stream, which is not always what was
+	// asked for: OpenObserve replaces every character outside [a-zA-Z0-9_:]
+	// with an underscore, so `app-logs` is stored as `app_logs`.
+	if stream.Name != "" {
+		model.EffectiveName = types.StringValue(stream.Name)
+	}
 	s := stream.Settings
 
 	model.DataRetention = types.Int64Value(s.DataRetention)

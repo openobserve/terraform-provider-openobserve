@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Destroying an `openobserve_stream` silently left it in place when the server
+  had renamed it**
+  ([#1](https://github.com/openobserve/terraform-provider-openobserve/issues/1)).
+  OpenObserve replaces every character outside `[a-zA-Z0-9_:]` in a stream name
+  with an underscore, so a stream created as `live-test-stream` is stored as
+  `live_test_stream`. Create, schema, settings and update all normalize the name
+  they are given, so the configured name kept working everywhere the provider
+  looked. The delete endpoint does not normalize, so it answered 404 for a stream
+  that plainly existed, and the provider tolerated that 404 as "already gone".
+  The result reported success, dropped the resource from state, and left the
+  stream and its data behind. Deletes now resolve the stored name through the
+  normalizing read path first, so a 404 is only tolerated once a read has
+  confirmed the stream really is absent.
+- **`openobserve_stream` gained `effective_name`**, reporting the name
+  OpenObserve actually stored. Alerts, dashboards and SQL have to reference that
+  name, so a rename the provider hid was a problem well beyond deletion.
+- **`terraform plan` failed outright on a variable-driven `multi_time_range`**
+  ([#2](https://github.com/openobserve/terraform-provider-openobserve/issues/2)).
+  The block was modelled as a Go slice, which cannot hold an unknown value, so a
+  `dynamic "multi_time_range"` block whose `for_each` came from a variable failed
+  config decode with *Received unknown value, however the target type cannot
+  handle unknown values*, before any validation ran. A literal `for_each` worked,
+  which made this look like a problem with the block's content rather than with
+  its type. It is now a framework list.
+- **A module wrapping `openobserve_slo` reported conflicting indicators that
+  were never set**
+  ([#3](https://github.com/openobserve/terraform-provider-openobserve/issues/3)).
+  Terraform materializes a `SingleNestedBlock` whose `dynamic` produced no
+  iterations as a present object full of unknowns rather than as a null object,
+  so the provider's nil check counted indicators nobody wrote. Validation now
+  reads the raw configuration and tells absent apart from not-yet-known,
+  deciding only when the answer is certain.
+
+### Changed
+
+- **Validation no longer fires on unknown values.** The report above was one
+  instance of a general rule the provider broke: several checks tested
+  `!IsNull()`, which is also true of a value that has simply not resolved yet.
+  That produced diagnostics nobody could act on, because the configuration was
+  correct and only evaluation order made the value unavailable. The alert
+  resource's count-gate, burn-rate window, aggregation warning and cron checks
+  were all reachable this way from a module, and are now guarded.
+
 ## [1.2.0] - 2026-08-20
 
 ### Added

@@ -42,6 +42,35 @@ Creating an alert against a stream that does not exist fails with a bare 404:
 In a running system ingestion creates streams. In a fresh organization, declare
 them explicitly before the alerts that reference them.
 
+### The server renames your stream
+
+OpenObserve replaces every character outside `[a-zA-Z0-9_:]` with an underscore,
+so a stream created as `app-logs` is stored as `app_logs`. It may also lowercase
+the name, depending on `ZO_FORMAT_STREAM_NAME_TO_LOWER`.
+
+`effective_name` reports what was actually stored:
+
+```hcl
+resource "openobserve_stream" "app_logs" {
+  name        = "app-logs"
+  stream_type = "logs"
+}
+
+output "queried_as" {
+  value = openobserve_stream.app_logs.effective_name # "app_logs"
+}
+```
+
+This matters beyond cosmetics. Alerts, dashboards and SQL must reference the
+stored name, so an alert querying `FROM "app-logs"` finds nothing. **Write
+stream names in their normalized form** and the whole problem disappears.
+
+The normalization is also inconsistent server-side: create, schema, settings and
+update all normalize the name they are given, but the delete endpoint does not.
+The provider resolves the stored name before deleting, so this is handled, but
+a hand-rolled `curl` delete against the name you configured will answer 404 for
+a stream that plainly exists.
+
 ### Settings are deltas
 
 `PUT /api/{org}/streams/{name}/settings` takes every list setting as

@@ -1129,3 +1129,66 @@ func canonicalCompositeExpressionOf(t *testing.T, expression string) string {
 	}
 	return canonical
 }
+
+// TestIntegrationStreamNameNormalizationDelete is regression cover for
+// openobserve/terraform-provider-openobserve#1.
+//
+// OpenObserve normalizes stream names on create, schema, settings and update,
+// replacing every character outside [a-zA-Z0-9_:] with an underscore. Its
+// delete handler does not normalize. So a stream created as `tf-it-x` is stored
+// as `tf_it_x`, reads back fine under either spelling, and answers 404 when
+// deleted under the name the caller used.
+//
+// The provider tolerated that 404 as "already gone", which turned a failed
+// delete into a destroy that reported success and left the stream and its data
+// in place. This asserts the stream is really gone afterwards, because the
+// delete call returning nil is exactly what the bug already did.
+func TestIntegrationStreamNameNormalizationDelete(t *testing.T) {
+	c := integrationClient(t)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+
+	// Hyphens are the common case: legal in HCL, normalized by the server.
+	requested := strings.ReplaceAll(uniqueName("tf-it-normalized"), "_", "-")
+	if !strings.Contains(requested, "-") {
+		t.Fatalf("test name %q needs a character the server normalizes", requested)
+	}
+
+	if err := c.CreateStream(ctx, org, "logs", requested, CreateStreamAPI{}); err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+
+	stream, err := c.GetStream(ctx, org, "logs", requested)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if stream == nil {
+		t.Fatal("GetStream returned nothing for a stream that was just created")
+	}
+	stored := stream.Name
+	t.Cleanup(func() { _ = c.DeleteStream(ctx, org, "logs", stored) })
+
+	if stored == requested {
+		t.Skipf("this server did not normalize %q, so there is nothing to regress against "+
+			"(ZO_SKIP_FORMATTING_STREAM_NAME may be set)", requested)
+	}
+
+	if err := c.DeleteStream(ctx, org, "logs", requested); err != nil {
+		t.Fatalf("DeleteStream by the requested name: %v", err)
+	}
+
+	// The delete reporting success is not enough: that is what the bug did.
+	gone, err := c.GetStream(ctx, org, "logs", stored)
+	if err != nil {
+		t.Fatalf("GetStream after delete: %v", err)
+	}
+	if gone != nil {
+		t.Errorf("stream %q (requested as %q) still exists after a delete that reported success",
+			stored, requested)
+	}
+
+	// A repeated delete stays successful, so a retried destroy does not fail.
+	if err := c.DeleteStream(ctx, org, "logs", requested); err != nil {
+		t.Errorf("second DeleteStream: %v", err)
+	}
+}

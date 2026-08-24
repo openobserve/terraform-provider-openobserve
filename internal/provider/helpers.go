@@ -11,7 +11,9 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -390,4 +392,97 @@ func boolPreserveNull(configured types.Bool, server bool) types.Bool {
 		return types.BoolNull()
 	}
 	return types.BoolValue(server)
+}
+
+// ---------------------------------------------------------------------------
+// Configuration presence, for ValidateConfig
+// ---------------------------------------------------------------------------
+
+// Validation must never fire on an unknown value.
+//
+// Unknown means "not determined yet", so a value that is merely unresolved
+// during plan is indistinguishable from one the author never wrote. Erroring on
+// it produces a diagnostic the user cannot act on, because the configuration is
+// correct and only the ordering made the value unavailable.
+//
+// This bites hardest on a nested block driven by a `dynamic` block inside a
+// module. Terraform materializes a SingleNestedBlock whose `dynamic` produced no
+// iterations as a present object whose attributes are unknown, rather than as a
+// null object, so a bare `!= nil` on the model pointer reports a block the
+// author never wrote. That is the shape of openobserve/terraform-provider-openobserve#3.
+
+// blockPresence is what a nested block's configuration can tell us.
+type blockPresence int
+
+const (
+	// blockAbsent means nothing inside the block was written.
+	blockAbsent blockPresence = iota
+	// blockConfigured means at least one value inside it is known and set.
+	blockConfigured
+	// blockIndeterminate means the block carries unknowns, so whether the
+	// author wrote it cannot be decided yet. Skip the check.
+	blockIndeterminate
+)
+
+// knownAndSet reports whether a scalar was written and has already resolved.
+// Use this rather than !IsNull() anywhere a diagnostic depends on the answer.
+func knownAndSet(v attr.Value) bool {
+	return v != nil && !v.IsNull() && !v.IsUnknown()
+}
+
+// valuePresence classifies a configuration value, descending into nested
+// objects so that a block containing only unknown leaves is reported as
+// indeterminate rather than as configured.
+func valuePresence(v attr.Value) blockPresence {
+	if v == nil || v.IsNull() {
+		return blockAbsent
+	}
+	if v.IsUnknown() {
+		return blockIndeterminate
+	}
+
+	switch t := v.(type) {
+	case types.Object:
+		result := blockAbsent
+		for _, av := range t.Attributes() {
+			switch valuePresence(av) {
+			case blockConfigured:
+				return blockConfigured
+			case blockIndeterminate:
+				result = blockIndeterminate
+			}
+		}
+		return result
+	case types.List:
+		if len(t.Elements()) == 0 {
+			return blockAbsent
+		}
+		return blockConfigured
+	case types.Set:
+		if len(t.Elements()) == 0 {
+			return blockAbsent
+		}
+		return blockConfigured
+	case types.Map:
+		if len(t.Elements()) == 0 {
+			return blockAbsent
+		}
+		return blockConfigured
+	default:
+		return blockConfigured
+	}
+}
+
+// nestedBlockPresence classifies the nested block at the given path, reading it
+// from the raw configuration rather than from a decoded model pointer. The
+// pointer cannot express the difference between an absent block and one whose
+// contents are not yet known.
+func nestedBlockPresence(ctx context.Context, cfg tfsdk.Config, p path.Path) blockPresence {
+	var obj types.Object
+	if diags := cfg.GetAttribute(ctx, p, &obj); diags.HasError() {
+		// An unreadable block is not something to raise a validation error
+		// about; leave it to apply, which sees concrete values.
+		return blockIndeterminate
+	}
+	return valuePresence(obj)
 }

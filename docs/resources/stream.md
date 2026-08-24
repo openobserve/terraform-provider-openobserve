@@ -55,6 +55,8 @@ resource "openobserve_stream" "metrics" {
 ### Required
 
 - `name` (String) Stream name.
+
+OpenObserve normalizes this: every character outside `[a-zA-Z0-9_:]` is replaced with an underscore, so a stream created as `app-logs` is stored as `app_logs`. The stored name is reported in `effective_name`. Naming the stream in its normalized form avoids the surprise.
 - `stream_type` (String) Stream type: `logs`, `metrics`, `traces`, or `metadata`.
 
 ### Optional
@@ -78,6 +80,7 @@ resource "openobserve_stream" "metrics" {
 
 ### Read-Only
 
+- `effective_name` (String) The name OpenObserve actually stored, which differs from `name` when the server normalized it. Queries, dashboards and alerts must reference this name rather than the configured one.
 - `id` (String) Resource ID in the format `{org_id}/{stream_type}/{name}`.
 - `schema` (Attributes List) Columns discovered in the stream, as reported by the server. (see [below for nested schema](#nestedatt--schema))
 - `storage_type` (String) Storage tier reported by the server.
