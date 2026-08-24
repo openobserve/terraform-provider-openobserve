@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.1] - 2026-08-24
+
+Bug fixes only. The resource and data source schemas are unchanged apart from
+one new computed attribute, so upgrading from `1.2.0` needs no configuration
+changes.
 
 ### Fixed
 
@@ -300,6 +304,7 @@ a stream or dashboard onto the new schema without touching the server.
 - Comprehensive examples for all resources and data sources
 - Apache 2.0 license
 
+[1.2.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.2.1
 [1.2.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.2.0
 [1.1.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.1.0
 [1.0.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.0.1
