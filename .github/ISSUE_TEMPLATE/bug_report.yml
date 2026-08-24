@@ -112,7 +112,7 @@ body:
         unrelated, and redact endpoints, tokens and passwords.
 
         This is automatically formatted as HCL; no need for backticks.
-      render: terraform
+      render: hcl
       placeholder: |
         resource "openobserve_alert" "example" {
           name         = "high-error-rate"

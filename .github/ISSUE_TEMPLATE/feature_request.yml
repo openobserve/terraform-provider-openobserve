@@ -55,7 +55,7 @@ body:
         A sketch is fine, and does not need to be valid HCL. Seeing the shape
         you have in mind is often the fastest way to spot a mismatch with how
         the API actually behaves.
-      render: terraform
+      render: hcl
       placeholder: |
         resource "openobserve_something" "example" {
           name = "example"
