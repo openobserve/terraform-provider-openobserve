@@ -135,5 +135,6 @@ recreate anything.
 
 - [Alerting](alerting): every query type, warning thresholds, and per-group alerts
 - [Service level objectives](slos): error budgets and burn-rate alerts
+- [Pipelines](pipelines): transforming records in flight with VRL functions
 - [Dashboards](dashboards): panel JSON without the guesswork
 - [Roles and groups](rbac): permissions, groups, and service accounts

@@ -10,7 +10,7 @@ terraform {
   required_providers {
     openobserve = {
       source  = "openobserve/openobserve"
-      version = "~> 1.2"
+      version = "~> 1.3"
     }
   }
 }

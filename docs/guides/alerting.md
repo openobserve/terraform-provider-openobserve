@@ -42,6 +42,11 @@ Email destinations only accept addresses belonging to users in the organization.
 SNS destinations need both `sns_topic_arn` and `aws_region`. The provider checks
 these combinations during `plan`, rather than letting the apply fail.
 
+~> The template is what makes this an *alert* destination. The same endpoint
+stores pipeline destinations, which carry no template and cannot be used by an
+alert. Use `openobserve_pipeline_destination` for those; see the
+[pipelines guide](pipelines).
+
 ## The four query types
 
 ### `sql`: an aggregate compared against a threshold

@@ -1,0 +1,306 @@
+---
+page_title: "Pipelines"
+subcategory: "Guides"
+description: |-
+  Transforming records in flight with pipelines, VRL functions, and pipeline destinations.
+---
+
+# Pipelines
+
+A pipeline changes records on their way in. It reads from a stream, passes each
+record through nodes that transform or filter it, and writes the result to
+another stream or forwards it somewhere outside OpenObserve.
+
+Three resources are involved, and they only make sense together:
+
+| Resource | What it is |
+|---|---|
+| `openobserve_pipeline` | The graph: what happens, in what order |
+| `openobserve_function` | A transform, written in VRL or JavaScript |
+| `openobserve_pipeline_destination` | Somewhere outside OpenObserve to send records |
+
+## The rule that matters most
+
+**Reference the function and the destination. Do not name them.**
+
+```hcl
+node {
+  id            = "redact"
+  type          = "function"
+  function_name = openobserve_function.redact_email.name   # not "redact_email"
+}
+```
+
+The server refuses to delete a function or a destination while a pipeline still
+uses it:
+
+```
+409  Warning: Function 'redact_email' has 1 pipeline dependencies.
+     Please remove these pipelines first: [{"id":"749786...","name":"redact_pii"}]
+
+409  Destination is currently used by pipeline: ship_audit
+```
+
+That reference is what tells Terraform to create the function before the
+pipeline and to destroy the pipeline before the function. Written as a literal
+string, Terraform sees no dependency, and the destroy fails.
+
+## A first pipeline
+
+```hcl
+resource "openobserve_function" "redact_email" {
+  name = "redact_email"
+
+  function = <<-VRL
+    .email = "[redacted]"
+  VRL
+}
+
+resource "openobserve_pipeline" "redact_pii" {
+  name        = "redact_pii"
+  description = "Strip email addresses before they land"
+  stream_name = openobserve_stream.app_logs.name
+
+  node {
+    id          = "in"
+    type        = "stream"
+    stream_name = openobserve_stream.app_logs.name
+  }
+
+  node {
+    id            = "redact"
+    type          = "function"
+    function_name = openobserve_function.redact_email.name
+  }
+
+  node {
+    id          = "out"
+    type        = "stream"
+    stream_name = openobserve_stream.app_logs_clean.name
+  }
+
+  edge {
+    from = "in"
+    to   = "redact"
+  }
+
+  edge {
+    from = "redact"
+    to   = "out"
+  }
+}
+```
+
+~> **Edges are multi-line blocks.** HCL allows only one argument on a single
+line, so `edge { from = "in", to = "out" }` is a syntax error.
+
+## Node types
+
+| `type` | Needs | Does |
+|---|---|---|
+| `stream` | `stream_name` | Reads from or writes to a stream |
+| `function` | `function_name` | Applies a transform |
+| `condition` | `conditions` | Drops records that do not match |
+| `remote_stream` | `destination_name` | Forwards to a pipeline destination |
+
+A node block is flat, with a `type` telling the others which fields apply,
+rather than a separate block shape per kind. That keeps `dynamic "node"` usable
+for a module that builds its graph from a variable.
+
+## What you do not have to write
+
+Three things the API requires and the provider fills in:
+
+**`io_type`** is inferred from the edges. A node with nothing arriving is the
+`input`, one with nothing leaving is an `output`, anything else is `default`.
+
+**Node positions** are laid out left to right in declaration order. They only
+affect the visual editor, but the server rejects a node without them.
+
+**Edge ids** follow the server's own `e{from}-{to}` convention, so a pipeline
+written here looks like one built in the UI.
+
+All three can still be set explicitly when a particular layout matters.
+
+## Functions
+
+The server compiles the body when it is saved, so a mistake fails
+`terraform apply` rather than turning up later as a pipeline that quietly
+stopped working.
+
+```hcl
+resource "openobserve_function" "enrich" {
+  name = "enrich_region"
+
+  function = <<-VRL
+    .region = if .country == "US" { "amer" } else { "intl" }
+  VRL
+}
+```
+
+VRL is the default. Set `language = "js"` for JavaScript, and the server
+compiles it as JavaScript instead.
+
+~> A VRL program's value is its last expression, and a transform has to return
+the record, so the server appends a trailing `.` to a body that does not already
+end in one. The provider treats that as equivalent to what you wrote, so it does
+not appear as drift.
+
+`params` names what the body receives, and defaults to `row`: the whole record,
+which is what a pipeline transform wants.
+
+## Filtering with a condition node
+
+`conditions` is a JSON document, so build it with `jsonencode()`. `and`, `or`
+and `not` nest, and the leaves are column comparisons. This is the same shape an
+alert's `custom` conditions take.
+
+```hcl
+node {
+  id   = "errors_only"
+  type = "condition"
+
+  conditions = jsonencode({
+    and = [
+      { column = "level", operator = "=", value = "error", ignore_case = false },
+    ]
+  })
+}
+```
+
+An empty condition set is rejected: a filter that filters nothing is almost
+always a mistake.
+
+## Sending records elsewhere
+
+A `remote_stream` node forwards to a pipeline destination.
+
+```hcl
+resource "openobserve_pipeline_destination" "warehouse" {
+  name = "warehouse"
+  url  = "https://warehouse.example.com/ingest"
+
+  headers = {
+    Authorization = "Bearer ${var.warehouse_token}"
+  }
+}
+
+resource "openobserve_pipeline" "ship_audit" {
+  name        = "ship_audit"
+  stream_name = openobserve_stream.audit.name
+
+  node {
+    id          = "in"
+    type        = "stream"
+    stream_name = openobserve_stream.audit.name
+  }
+
+  node {
+    id               = "out"
+    type             = "remote_stream"
+    destination_name = openobserve_pipeline_destination.warehouse.name
+  }
+
+  edge {
+    from = "in"
+    to   = "out"
+  }
+}
+```
+
+### Pipeline destinations and alert destinations
+
+These are the same object underneath, stored through the same endpoints. The
+server tells them apart by one field: a destination carrying a `template` is an
+alert destination, and one without is a pipeline destination that alerts cannot
+use.
+
+They are separate resources here because that single field decides what the
+object is for, and because the rest of the alert surface, templates, email
+recipients and SNS, has no meaning for a pipeline. Use
+`openobserve_alert_destination` for alerts and `openobserve_pipeline_destination`
+for pipelines, and neither can be mistaken for the other.
+
+Set `destination_type` when the far end is a system OpenObserve knows how to
+format for: `openobserve`, `splunk`, `elasticsearch`, or `custom`. Leave it
+unset for a plain webhook.
+
+~> The URL is resolved when the destination is saved. A host that does not
+resolve is rejected with *Destination URL blocked by SSRF guard*, so the
+endpoint has to exist by the time Terraform applies.
+
+## One realtime pipeline per source stream
+
+A stream can be the source of only one realtime pipeline:
+
+> `A realtime pipeline with same source stream already exists`
+
+Extend the existing pipeline rather than adding a second one on the same stream.
+A pipeline can fan out to several outputs, so this is rarely a real constraint.
+
+## Pausing
+
+`enabled = false` leaves the pipeline configured but idle. Pausing is its own
+endpoint rather than a field on the update body, and the provider issues the
+extra call when the value changes, so from configuration it simply works.
+
+## Names are lowercased
+
+The server trims a pipeline name and lowercases it, so `My Pipeline` is stored
+as `my pipeline`. Writing names lowercase avoids the surprise. Stream names get
+similar treatment; see the `openobserve_stream` documentation for
+`effective_name`.
+
+## What the provider checks before applying
+
+- Node ids are unique, since edges join nodes by id
+- Every edge endpoint names a declared node
+- Each node type carries the field it needs
+- At least two nodes, and at least one edge
+
+The server additionally checks that the graph is connected and that every node
+is reachable from the input.
+
+## Finding what to import
+
+A pipeline's identifier is assigned by the server and appears nowhere in
+configuration:
+
+```hcl
+data "openobserve_pipelines" "all" {}
+
+output "pipeline_ids" {
+  value = { for p in data.openobserve_pipelines.all.pipelines : p.name => p.pipeline_id }
+}
+```
+
+```bash
+terraform import openobserve_pipeline.redact_pii          default/7497861055431835648
+terraform import openobserve_function.redact_email        default/redact_email
+terraform import openobserve_pipeline_destination.warehouse default/warehouse
+```
+
+When a delete is refused and the pipeline holding a function was not created
+here, the function data source says which one it is:
+
+```hcl
+data "openobserve_function" "redact" {
+  name = "redact_email"
+}
+
+output "blocking_pipelines" {
+  value = data.openobserve_function.redact.used_by
+}
+```
+
+## Full examples
+
+{{ tffile "examples/resources/openobserve_pipeline/resource.tf" }}
+
+### Functions
+
+{{ tffile "examples/resources/openobserve_function/resource.tf" }}
+
+### Pipeline destinations
+
+{{ tffile "examples/resources/openobserve_pipeline_destination/resource.tf" }}

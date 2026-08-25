@@ -1,5 +1,6 @@
 # A complete OpenObserve stack: stream, notification path, dashboard,
-# objective, and four kinds of alert on top of them.
+# objective, five kinds of alert, and a pipeline transforming records on the
+# way in.
 #
 # Credentials come from the environment:
 #   OPENOBSERVE_ENDPOINT, OPENOBSERVE_USERNAME, OPENOBSERVE_PASSWORD, OPENOBSERVE_ORG_ID
@@ -8,7 +9,7 @@ terraform {
   required_providers {
     openobserve = {
       source  = "openobserve/openobserve"
-      version = "~> 1.2"
+      version = "~> 1.3"
     }
   }
 }
@@ -267,6 +268,61 @@ resource "openobserve_composite_alert" "bad_deploy" {
   tags     = ["prod", "composite"]
 }
 
+# --- Pipeline ----------------------------------------------------------------
+#
+# Records are transformed on the way in, before anything above ever queries
+# them. `function_name` references the function resource rather than naming it:
+# that reference is what orders creation and teardown, and the server refuses to
+# delete a function a pipeline still uses.
+
+resource "openobserve_stream" "app_logs_clean" {
+  name        = "app_logs_clean"
+  stream_type = "logs"
+}
+
+resource "openobserve_function" "redact_email" {
+  name = "redact_email"
+
+  function = <<-VRL
+    .email = "[redacted]"
+  VRL
+}
+
+resource "openobserve_pipeline" "redact_pii" {
+  name        = "redact_pii"
+  description = "Strip email addresses before they land"
+  stream_name = openobserve_stream.app_logs.name
+
+  node {
+    id          = "in"
+    type        = "stream"
+    stream_name = openobserve_stream.app_logs.name
+  }
+
+  node {
+    id            = "redact"
+    type          = "function"
+    function_name = openobserve_function.redact_email.name
+  }
+
+  node {
+    id          = "out"
+    type        = "stream"
+    stream_name = openobserve_stream.app_logs_clean.name
+  }
+
+  # Edges are multi-line: HCL allows only one argument on a single-line block.
+  edge {
+    from = "in"
+    to   = "redact"
+  }
+
+  edge {
+    from = "redact"
+    to   = "out"
+  }
+}
+
 # --- Reading it back ---------------------------------------------------------
 
 data "openobserve_slo" "checkout" {
@@ -286,4 +342,9 @@ output "objective_frozen" {
 
 output "composite_children" {
   value = openobserve_composite_alert.bad_deploy.child_alert_ids
+}
+
+# io_type is inferred from the edges rather than written by hand.
+output "pipeline_io_types" {
+  value = { for n in openobserve_pipeline.redact_pii.node : n.id => n.io_type }
 }

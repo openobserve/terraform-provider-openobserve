@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-08-25
+
+Documentation only. No provider behaviour changed, and the resource and data
+source schemas are identical to `1.3.0`.
+
+### Added
+
+- **A pipelines guide on the Registry.** `1.3.0` shipped the resources without
+  one, so the only narrative coverage lived in the repository's Claude skill,
+  which Registry readers never see. The guide covers the graph model, the four
+  node types, what the provider fills in (`io_type`, positions, edge ids), VRL
+  functions and their trailing dot, condition nodes, the one-realtime-pipeline
+  per-source-stream rule, and finding the server-assigned id an import needs.
+- **The alerting guide now points pipeline destinations at their own resource.**
+  It already noted that a destination without a template cannot be used by an
+  alert; it now says which resource to reach for instead, and why the two are
+  separate.
+
+### Changed
+
+- The provider index and getting-started guide list pipelines alongside the
+  other areas.
+- The Claude skill under `skills/` is current with `1.3.0`: every example pins
+  `~> 1.3`, the complete-stack example now includes a pipeline so it is actually
+  complete, and the import and drift reference covers the new resources' import
+  IDs, the function adoption path, and VRL body spelling preservation.
+
+Every example in the repository and the skill was applied against a live server
+before release.
+
 ## [1.3.0] - 2026-08-24
 
 ### Added
@@ -366,6 +396,7 @@ a stream or dashboard onto the new schema without touching the server.
 - Comprehensive examples for all resources and data sources
 - Apache 2.0 license
 
+[1.3.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.3.1
 [1.3.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.3.0
 [1.2.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.2.1
 [1.2.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.2.0
