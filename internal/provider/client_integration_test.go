@@ -1192,3 +1192,250 @@ func TestIntegrationStreamNameNormalizationDelete(t *testing.T) {
 		t.Errorf("second DeleteStream: %v", err)
 	}
 }
+
+// TestIntegrationPipelineLifecycle covers functions, pipeline destinations and
+// pipelines together, because the interesting behaviour is in how they depend
+// on each other rather than in any one of them.
+func TestIntegrationPipelineLifecycle(t *testing.T) {
+	c := integrationClient(t)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+
+	srcStream := uniqueName("tf_it_pipe_src")
+	dstStream := uniqueName("tf_it_pipe_dst")
+	for _, s := range []string{srcStream, dstStream} {
+		if err := c.CreateStream(ctx, org, "logs", s, CreateStreamAPI{}); err != nil {
+			t.Fatalf("CreateStream(%s): %v", s, err)
+		}
+		t.Cleanup(func() { _ = c.DeleteStream(ctx, org, "logs", s) })
+	}
+
+	// --- function ---------------------------------------------------------
+	vrl := int64(0)
+	fnName := uniqueName("tf_it_fn")
+	body := `.processed = true`
+	if err := c.CreateFunction(ctx, org, FunctionAPI{
+		Name: fnName, Function: body, Params: "row", TransType: &vrl,
+	}); err != nil {
+		t.Fatalf("CreateFunction: %v", err)
+	}
+
+	fn, err := c.GetFunction(ctx, org, fnName)
+	if err != nil {
+		t.Fatalf("GetFunction: %v", err)
+	}
+	if fn == nil {
+		t.Fatal("GetFunction returned nothing for a function that was just created")
+	}
+	if functionLanguage(fn.TransType) != "vrl" {
+		t.Errorf("language = %q, want vrl", functionLanguage(fn.TransType))
+	}
+	// A VRL program's value is its last expression, so the server appends a
+	// trailing `.` to make the transform return the record.
+	if fn.Function == body {
+		t.Error("expected the server to append a trailing return expression to the VRL body")
+	}
+	if !vrlBodiesEquivalent(body, fn.Function) {
+		t.Errorf("stored body %q is not equivalent to %q", fn.Function, body)
+	}
+
+	// Creating the same name again is refused rather than overwriting.
+	err = c.CreateFunction(ctx, org, FunctionAPI{Name: fnName, Function: body, Params: "row", TransType: &vrl})
+	if !isFunctionAlreadyExists(err) {
+		t.Errorf("re-creating a function gave %v, want the already-exists refusal", err)
+	}
+
+	// --- pipeline destination --------------------------------------------
+	destName := uniqueName("tf_it_pipe_dest")
+	if err := c.CreatePipelineDestination(ctx, org, PipelineDestinationAPI{
+		Name: destName, URL: "https://example.com/sink", Method: "post",
+	}); err != nil {
+		t.Fatalf("CreatePipelineDestination: %v", err)
+	}
+	dest, err := c.GetPipelineDestination(ctx, org, destName)
+	if err != nil {
+		t.Fatalf("GetPipelineDestination: %v", err)
+	}
+	if dest == nil || dest.URL != "https://example.com/sink" {
+		t.Fatalf("destination = %+v, want the configured URL", dest)
+	}
+
+	// --- pipeline ---------------------------------------------------------
+	after := true
+	pipelineName := uniqueName("tf_it_pipeline")
+	err = c.CreatePipeline(ctx, org, PipelineAPI{
+		Name:    pipelineName,
+		Enabled: true,
+		Source: PipelineSourceAPI{
+			SourceType: "realtime", OrgID: org, StreamName: srcStream, StreamType: "logs",
+		},
+		Nodes: []PipelineNodeAPI{
+			{ID: "in", IOType: "input", Position: PipelinePositionAPI{},
+				Data: PipelineNodeDataAPI{NodeType: "stream", OrgID: org, StreamName: srcStream, StreamType: "logs"}},
+			{ID: "fn", IOType: "default", Position: PipelinePositionAPI{X: 250},
+				Data: PipelineNodeDataAPI{NodeType: "function", Name: fnName, AfterFlatten: &after}},
+			{ID: "out", IOType: "output", Position: PipelinePositionAPI{X: 500},
+				Data: PipelineNodeDataAPI{NodeType: "stream", OrgID: org, StreamName: dstStream, StreamType: "logs"}},
+		},
+		Edges: []PipelineEdgeAPI{
+			{ID: "ein-fn", Source: "in", Target: "fn"},
+			{ID: "efn-out", Source: "fn", Target: "out"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+
+	found, err := c.FindPipelineByName(ctx, org, pipelineName)
+	if err != nil {
+		t.Fatalf("FindPipelineByName: %v", err)
+	}
+	if found == nil {
+		t.Fatal("FindPipelineByName returned nothing for a pipeline that was just created")
+	}
+	pipelineID := found.ID
+
+	// Registered before the function and destination so the pipeline is torn
+	// down first: neither can be deleted while it references them.
+	t.Cleanup(func() { _ = c.DeleteFunction(ctx, org, fnName) })
+	t.Cleanup(func() { _ = c.DeletePipelineDestination(ctx, org, destName) })
+	t.Cleanup(func() {
+		if err := c.DeletePipeline(ctx, org, pipelineID); err != nil {
+			t.Errorf("DeletePipeline: %v", err)
+		}
+	})
+
+	pipeline, err := c.GetPipeline(ctx, org, pipelineID)
+	if err != nil {
+		t.Fatalf("GetPipeline: %v", err)
+	}
+	if pipeline == nil {
+		t.Fatal("GetPipeline returned nothing")
+	}
+	if len(pipeline.Nodes) != 3 || len(pipeline.Edges) != 2 {
+		t.Errorf("graph has %d nodes and %d edges, want 3 and 2", len(pipeline.Nodes), len(pipeline.Edges))
+	}
+
+	// This is the dependency the whole design turns on: a function in use
+	// cannot be deleted, so Terraform has to destroy the pipeline first.
+	err = c.DeleteFunction(ctx, org, fnName)
+	if err == nil {
+		t.Error("deleting a function a pipeline uses succeeded; expected the server to refuse it")
+	} else if detail := pipelineErrorDetail(err); !strings.Contains(detail, "Destroy the pipeline first") {
+		t.Errorf("in-use function error was not annotated: %s", detail)
+	}
+
+	deps, err := c.ListFunctionDependencies(ctx, org, fnName)
+	if err != nil {
+		t.Fatalf("ListFunctionDependencies: %v", err)
+	}
+	if len(deps) != 1 || deps[0].ID != pipelineID {
+		t.Errorf("dependencies = %+v, want exactly the pipeline %q", deps, pipelineID)
+	}
+
+	// The same holds for a destination, through a different code path.
+	shipStream := uniqueName("tf_it_pipe_ship")
+	if err := c.CreateStream(ctx, org, "logs", shipStream, CreateStreamAPI{}); err != nil {
+		t.Fatalf("CreateStream(ship): %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteStream(ctx, org, "logs", shipStream) })
+
+	shipName := uniqueName("tf_it_ship")
+	err = c.CreatePipeline(ctx, org, PipelineAPI{
+		Name:    shipName,
+		Enabled: true,
+		Source: PipelineSourceAPI{
+			SourceType: "realtime", OrgID: org, StreamName: shipStream, StreamType: "logs",
+		},
+		Nodes: []PipelineNodeAPI{
+			{ID: "in", IOType: "input", Position: PipelinePositionAPI{},
+				Data: PipelineNodeDataAPI{NodeType: "stream", OrgID: org, StreamName: shipStream, StreamType: "logs"}},
+			{ID: "out", IOType: "output", Position: PipelinePositionAPI{X: 250},
+				Data: PipelineNodeDataAPI{NodeType: "remote_stream", OrgID: org, DestinationName: destName}},
+		},
+		Edges: []PipelineEdgeAPI{{ID: "ein-out", Source: "in", Target: "out"}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline(ship): %v", err)
+	}
+	shipFound, err := c.FindPipelineByName(ctx, org, shipName)
+	if err != nil || shipFound == nil {
+		t.Fatalf("FindPipelineByName(ship): %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeletePipeline(ctx, org, shipFound.ID) })
+
+	err = c.DeletePipelineDestination(ctx, org, destName)
+	if err == nil {
+		t.Error("deleting a destination a pipeline uses succeeded; expected the server to refuse it")
+	} else if detail := pipelineErrorDetail(err); !strings.Contains(detail, "Destroy the pipeline first") {
+		t.Errorf("in-use destination error was not annotated: %s", detail)
+	}
+
+	// A stream can source only one realtime pipeline.
+	err = c.CreatePipeline(ctx, org, PipelineAPI{
+		Name:    uniqueName("tf_it_dup"),
+		Enabled: true,
+		Source: PipelineSourceAPI{
+			SourceType: "realtime", OrgID: org, StreamName: srcStream, StreamType: "logs",
+		},
+		Nodes: []PipelineNodeAPI{
+			{ID: "in", IOType: "input", Position: PipelinePositionAPI{},
+				Data: PipelineNodeDataAPI{NodeType: "stream", OrgID: org, StreamName: srcStream, StreamType: "logs"}},
+			{ID: "out", IOType: "output", Position: PipelinePositionAPI{X: 250},
+				Data: PipelineNodeDataAPI{NodeType: "stream", OrgID: org, StreamName: dstStream, StreamType: "logs"}},
+		},
+		Edges: []PipelineEdgeAPI{{ID: "ein-out", Source: "in", Target: "out"}},
+	})
+	if err == nil {
+		t.Error("a second realtime pipeline on the same source stream succeeded; expected a refusal")
+	} else if detail := pipelineErrorDetail(err); !strings.Contains(detail, "only one realtime pipeline") {
+		t.Errorf("duplicate-source error was not annotated: %s", detail)
+	}
+
+	// Pausing is its own endpoint rather than a field on the update body.
+	if err := c.SetPipelineEnabled(ctx, org, pipelineID, false); err != nil {
+		t.Fatalf("SetPipelineEnabled: %v", err)
+	}
+	paused, err := c.GetPipeline(ctx, org, pipelineID)
+	if err != nil {
+		t.Fatalf("GetPipeline after disable: %v", err)
+	}
+	if paused.Enabled {
+		t.Error("pipeline is still enabled after being paused")
+	}
+}
+
+// TestIntegrationFunctionLanguageCasing guards the casing trap in the function
+// wire format. Transform is serialized with rename_all = "camelCase", so the
+// snake_case spellings are not rejected, they are silently ignored and the
+// field falls back to its default. Posting `trans_type: 1` for a JavaScript
+// function stores a VRL function and then fails to compile the body as VRL.
+func TestIntegrationFunctionLanguageCasing(t *testing.T) {
+	c := integrationClient(t)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+
+	js := int64(1)
+	name := uniqueName("tf_it_js")
+	if err := c.CreateFunction(ctx, org, FunctionAPI{
+		Name:      name,
+		Function:  "function process(row){ row.seen = true; return row }",
+		Params:    "row",
+		TransType: &js,
+	}); err != nil {
+		t.Fatalf("CreateFunction(js): %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteFunction(ctx, org, name) })
+
+	fn, err := c.GetFunction(ctx, org, name)
+	if err != nil {
+		t.Fatalf("GetFunction: %v", err)
+	}
+	if fn == nil {
+		t.Fatal("GetFunction returned nothing")
+	}
+	if got := functionLanguage(fn.TransType); got != "js" {
+		t.Errorf("language = %q, want js. The transType field is being dropped on the wire, which "+
+			"silently stores a VRL function instead.", got)
+	}
+}

@@ -5,6 +5,68 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-08-24
+
+### Added
+
+- **`openobserve_pipeline`**: pipelines that transform records in flight.
+  A pipeline is a graph, so it is written as `node` blocks joined by `edge`
+  blocks: records enter from a source stream, pass through nodes that transform
+  or filter them, and land in another stream or an external endpoint. Four node
+  types are supported: `stream`, `function`, `condition` and `remote_stream`.
+- **`openobserve_function`**: VRL and JavaScript transforms. The server compiles
+  the body when it is saved, so a syntax error fails `terraform apply` rather
+  than surfacing later as a pipeline that quietly stopped working.
+- **`openobserve_pipeline_destination`**: an external endpoint a pipeline
+  forwards to. This is the same underlying object as an alert destination, and
+  the server tells the two apart by one field: a destination carrying a template
+  is for alerts, one without is for pipelines. They are separate resources here
+  because that field decides what the object is for, and because templates,
+  email recipients and SNS do not apply to a pipeline.
+- **`openobserve_function`, `openobserve_functions` and `openobserve_pipelines`
+  data sources.** The singular function data source reports `used_by`, the
+  pipelines holding it, which is what answers why a delete was refused.
+  `openobserve_pipelines` carries the server-assigned identifiers a
+  `terraform import` needs, since a pipeline's id appears nowhere in
+  configuration.
+
+### Ordering
+
+A pipeline's function and destination must be **referenced**, not named:
+
+```hcl
+function_name = openobserve_function.redact.name   # not "redact"
+```
+
+The server refuses to delete either while a pipeline still uses it, answering
+`409` with the dependent pipelines listed. That reference is what tells
+Terraform to create them first and destroy the pipeline first; a literal string
+produces a teardown that fails. Both refusals are annotated with what to do
+about them.
+
+### What the provider fills in
+
+Three things the pipeline API requires but nobody should have to write:
+
+- `io_type` is inferred from the edges: nothing arriving means `input`, nothing
+  leaving means `output`, anything else is `default`.
+- Node positions are laid out left to right in declaration order. They are
+  cosmetic, but the server rejects a node without them.
+- Edge ids follow the server's own `e{from}-{to}` convention, so a pipeline
+  written in Terraform looks like one built in the UI.
+
+All three can still be set explicitly.
+
+### Normalization handled
+
+Two places where the server does not store what it was sent, both of which would
+otherwise show as drift on every plan:
+
+- A VRL body gains a trailing `.`, because a VRL program's value is its last
+  expression and a transform has to return the record.
+- A condition node's JSON comes back with keys in struct order, while
+  `jsonencode()` sorts them alphabetically.
+
 ## [1.2.1] - 2026-08-24
 
 Bug fixes only. The resource and data source schemas are unchanged apart from
@@ -304,6 +366,7 @@ a stream or dashboard onto the new schema without touching the server.
 - Comprehensive examples for all resources and data sources
 - Apache 2.0 license
 
+[1.3.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.3.0
 [1.2.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.2.1
 [1.2.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.2.0
 [1.1.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.1.0

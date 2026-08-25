@@ -21,7 +21,7 @@ terraform {
   required_providers {
     openobserve = {
       source  = "openobserve/openobserve"
-      version = "~> 1.2"
+      version = "~> 1.3"
     }
   }
 }
@@ -98,6 +98,9 @@ export OPENOBSERVE_ORG_ID="default"
 | `openobserve_alert`               | Scheduled and real-time alerts (SQL, PromQL, aggregation, and SLO)      |
 | `openobserve_composite_alert`     | Alerts that combine other alerts through a boolean expression           |
 | `openobserve_slo`                 | Service level objectives, with error budgets and burn-rate alerting     |
+| `openobserve_function`            | VRL and JavaScript transforms, compiled by the server on save           |
+| `openobserve_pipeline_destination`| External endpoints a pipeline forwards records to                       |
+| `openobserve_pipeline`            | Graphs that transform records in flight between streams                 |
 
 ## Data Sources
 
@@ -119,6 +122,8 @@ export OPENOBSERVE_ORG_ID="default"
 | `openobserve_composite_alert`      | One composite with each child's current state        |
 | `openobserve_composite_alert_references` | Composites that hold a given alert as a child  |
 | `openobserve_slo(s)`               | One objective with its measurement, or a listing     |
+| `openobserve_function(s)`          | One function with the pipelines using it, or a listing |
+| `openobserve_pipelines`            | Pipelines, with the ids an import needs              |
 
 † Requires OpenObserve Enterprise with OpenFGA enabled. Against an open-source
 deployment these return a diagnostic saying so rather than an opaque HTTP 403.
@@ -153,6 +158,9 @@ terraform import openobserve_alert_destination.example default/pagerduty
 terraform import openobserve_alert.example             default/2fXkZ8QlmNbYcV1pR3sT
 terraform import openobserve_composite_alert.example   default/2fXkZ8QlmNbYcV1pR3sT
 terraform import openobserve_slo.example               default/2fXkZ8QlmNbYcV1pR3sT
+terraform import openobserve_function.example          default/redact_email
+terraform import openobserve_pipeline_destination.example default/warehouse
+terraform import openobserve_pipeline.example          default/7497861055431835648
 ```
 
 A service account's API token is only ever returned when the account is created

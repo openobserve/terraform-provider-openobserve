@@ -1,6 +1,6 @@
 ---
 name: openobserve-terraform
-description: Write, review, and debug Terraform or OpenTofu configuration for OpenObserve using the openobserve/openobserve provider. Covers streams, folders, dashboards, alerts (SQL, PromQL, aggregation, SLO, composite), service level objectives, users, service accounts, roles, and groups, plus import, drift, and decoding OpenObserve API errors. Use whenever a task involves the openobserve Terraform provider, an openobserve_* resource or data source, or managing OpenObserve configuration as code.
+description: Write, review, and debug Terraform or OpenTofu configuration for OpenObserve using the openobserve/openobserve provider. Covers streams, folders, dashboards, alerts (SQL, PromQL, aggregation, SLO, composite), service level objectives, pipelines, VRL functions, pipeline destinations, users, service accounts, roles, and groups, plus import, drift, and decoding OpenObserve API errors. Use whenever a task involves the openobserve Terraform provider, an openobserve_* resource or data source, or managing OpenObserve configuration as code.
 ---
 
 # OpenObserve Terraform provider
@@ -28,7 +28,7 @@ terraform {
   required_providers {
     openobserve = {
       source  = "openobserve/openobserve"
-      version = "~> 1.2"
+      version = "~> 1.3"
     }
   }
 }
@@ -56,7 +56,7 @@ needs Terraform 1.0+ or any OpenTofu version.
 
 ## Resource inventory
 
-13 resources:
+16 resources:
 
 | Resource | Purpose |
 |---|---|
@@ -73,10 +73,13 @@ needs Terraform 1.0+ or any OpenTofu version.
 | `openobserve_alert` | Scheduled and real-time alerts (SQL, PromQL, aggregation, SLO) |
 | `openobserve_composite_alert` | Alerts that combine other alerts through a boolean expression |
 | `openobserve_slo` | Service level objectives |
+| `openobserve_function` | VRL or JavaScript transforms used by pipelines |
+| `openobserve_pipeline_destination` | An external endpoint a pipeline forwards to |
+| `openobserve_pipeline` | A graph that transforms records in flight |
 
-27 data sources: singular and plural forms of the above, plus
-`openobserve_user_roles`, `openobserve_resources` †, and
-`openobserve_composite_alert_references`.
+30 data sources: singular and plural forms of the above, plus
+`openobserve_user_roles`, `openobserve_resources` †,
+`openobserve_composite_alert_references`, and `openobserve_pipelines`.
 
 † Enterprise with OpenFGA (`ZO_OPENFGA_ENABLED=true`). On open source these
 return a diagnostic naming the feature, not a bare HTTP 403.
@@ -95,6 +98,7 @@ purpose; do not reconstruct their content from memory.
 | Any alert: SQL, PromQL, aggregation, thresholds, scheduling, per-group | `references/alerts.md` |
 | Alerts that combine other alerts | `references/composite-alerts.md` |
 | SLOs, indicators, error budgets, burn-rate alerts | `references/slos.md` |
+| Pipelines, VRL functions, pipeline destinations | `references/pipelines.md` |
 | Users, service accounts, roles, groups, permissions | `references/iam.md` |
 | Importing existing objects, or a plan that will not settle | `references/import-and-drift.md` |
 | An API error you want decoded | `references/errors.md` |
@@ -149,6 +153,10 @@ only scheduling attribute it takes.
 
 **A partition key cannot also be a secondary index field.** Keep the two lists
 disjoint.
+
+**A pipeline's function and destination must be referenced, not named.** Writing
+`openobserve_function.x.name` rather than `"x"` is what orders creation and
+teardown. The server refuses to delete either while a pipeline still uses it.
 
 **Role and group names outside `[a-zA-Z0-9_]` are silently rewritten** by the
 server. The provider rejects them during `plan` rather than tracking a name that

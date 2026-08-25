@@ -67,6 +67,21 @@ appends an explanation to each.
 | `composite_writes_disabled` | `ZO_ALERT_COMPOSITE_WRITES_ENABLED=false` | Re-enable it. It is on by default |
 | `composite_super_cluster_unsupported` | Composites on a super-cluster deployment | Not available there |
 
+## Pipelines, functions and destinations
+
+| Message | Cause | Fix |
+|---|---|---|
+| `Function already exist` (400) | Creating a function whose name is taken | The create endpoint refuses to overwrite. The provider adopts by updating; a raw call needs PUT |
+| `has N pipeline dependencies` (409) | Deleting a function a pipeline uses | Destroy the pipeline first. Reference `openobserve_function.<x>.name` so Terraform orders it |
+| `Destination is currently used by pipeline` (409) | Deleting a destination a pipeline sends to | Destroy the pipeline first, or remove its remote_stream node |
+| `A realtime pipeline with same source stream already exists` | Two realtime pipelines on one stream | A stream can source only one. Extend the existing pipeline |
+| `Destination URL blocked by SSRF guard` | The destination host does not resolve | The endpoint is resolved when saved, so it has to exist by apply time |
+| `there must be more than 1 node and at least 1 edge` | A graph with nothing in it | A pipeline needs a source and somewhere for records to go |
+| `Edge #N's source node not found in nodes list` | An edge names an undeclared node | Edge endpoints are node ids, not names. The provider catches this during `plan` |
+| `Failed to parse v1 conditions: data did not match any variant of untagged enum ConditionList` | A condition node using the v2 group shape | Use the v1 tree: `{"and": [{column, operator, value, ignore_case}]}` |
+| `ConditionNode must have non-empty conditions` | An empty condition set | A condition node that filters nothing is rejected |
+| A JS function is stored as VRL and fails to compile | `trans_type` sent instead of `transType` | The function wire format is camelCase, and the snake_case spelling is silently ignored |
+
 ## IAM
 
 | Message | Cause | Fix |

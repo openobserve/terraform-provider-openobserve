@@ -37,6 +37,7 @@ openobserve-terraform/
 │   ├── alerts.md                 all four query types, thresholds, per-group
 │   ├── composite-alerts.md       boolean expressions over other alerts
 │   ├── slos.md                   indicators, error budgets, burn-rate alerts
+│   ├── pipelines.md              pipelines, VRL functions, pipeline destinations
 │   ├── iam.md                    users, service accounts, roles, groups
 │   ├── import-and-drift.md       adoption, reconciliation, plans that will not settle
 │   ├── errors.md                 server errors decoded, with fixes
@@ -74,7 +75,7 @@ version.
 
 ## Keeping it current
 
-The reference files describe provider 1.2.0. When the provider adds a resource
+The reference files describe provider 1.3.0. When the provider adds a resource
 or an attribute:
 
 1. Update the inventory table in `SKILL.md`.
