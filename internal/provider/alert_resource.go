@@ -38,19 +38,14 @@ var (
 //
 //	unknown variant `is_not_empty`, expected one of `=`, `!=`, `>`, `>=`, `<`,
 //	`<=`, `Contains`, `NotContains`, `IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`
+// The last four are unary: they test a column without comparing it to
+// anything, so a condition using one carries no `value`, which is why `value`
+// is optional. There is no validator pairing the two, because conditions reach
+// the provider as an opaque JSON string rather than as attributes.
 var comparisonOperators = []string{
 	"=", "!=", ">", ">=", "<", "<=",
 	"Contains", "NotContains",
 	"IsNull", "IsNotNull", "IsEmpty", "IsNotEmpty",
-}
-
-// unaryOperators test a column without comparing it to anything, so a
-// condition using one needs no `value`.
-var unaryOperators = map[string]bool{
-	"IsNull":     true,
-	"IsNotNull":  true,
-	"IsEmpty":    true,
-	"IsNotEmpty": true,
 }
 
 // aggregationFunctions are the aggregate functions a `custom` alert can apply.
