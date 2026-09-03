@@ -62,6 +62,7 @@ type CompositeAlertWriteAPI struct {
 	Priority           *int64                `json:"priority,omitempty"`
 	Tags               []string              `json:"tags,omitempty"`
 	Owner              *string               `json:"owner,omitempty"`
+	PendingPeriodSec   int64                 `json:"pending_period_sec"`
 }
 
 // CompositeChildAPI is one resolved child in a composite's detail response.
@@ -109,6 +110,7 @@ type CompositeAlertAPI struct {
 	CompositeCondition  CompositeConditionAPI   `json:"composite_condition"`
 	Children            []CompositeChildAPI     `json:"children"`
 	Evaluation          *CompositeEvaluationAPI `json:"evaluation,omitempty"`
+	PendingPeriodSec    int64                   `json:"pending_period_sec"`
 }
 
 // CompositeValidationWarningAPI is one advisory warning from the validate endpoint.

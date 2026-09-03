@@ -123,6 +123,8 @@ func (p *OpenObserveProvider) Resources(_ context.Context) []func() resource.Res
 		NewFunctionResource,
 		NewPipelineDestinationResource,
 		NewPipelineResource,
+		NewIngestionTokenResource,
+		NewSyntheticResource,
 	}
 }
 
@@ -158,6 +160,9 @@ func (p *OpenObserveProvider) DataSources(_ context.Context) []func() datasource
 		NewFunctionDataSource,
 		NewFunctionsDataSource,
 		NewPipelinesDataSource,
+		NewSyntheticsDataSource,
+		NewSyntheticLocationsDataSource,
+		NewIngestionTokensDataSource,
 	}
 }
 

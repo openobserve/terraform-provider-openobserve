@@ -139,6 +139,9 @@ The server stores a fully parenthesized form of whatever you write, and the prov
 - `enabled` (Boolean) Whether the composite is evaluated. Disabled composites stay configured but never fire.
 - `folder_id` (String) Alert folder that holds this composite. Unlike an ordinary alert, which creates the default folder on demand, a composite requires the folder to already exist.
 - `org_id` (String) Organization the alert belongs to. Defaults to the provider's `org_id`.
+- `pending_period_sec` (Number) How long the expression must stay true before the composite fires, in seconds.
+
+Zero, the default, fires as soon as the expression becomes true. A pending period rides out a momentary coincidence, which matters more here than on an ordinary alert: two children happening to be true in the same instant is not the same as both being true for a minute.
 - `priority` (Number) Priority from 1 (most urgent) to 5. Display and propagation only; it does not affect when the composite fires.
 - `silence` (Number) Minutes the composite stays quiet after firing. This is the only scheduling attribute a composite accepts; it has no period or frequency because it does not run a query.
 - `stale_child_policy` (String) What a child contributes once its state goes stale, meaning it has not been evaluated within three times its own cadence.

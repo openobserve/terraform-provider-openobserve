@@ -1439,3 +1439,296 @@ func TestIntegrationFunctionLanguageCasing(t *testing.T) {
 			"silently stores a VRL function instead.", got)
 	}
 }
+
+// TestIntegrationIngestionTokenLifecycle covers the token family, including the
+// part that shapes the resource: there is no delete endpoint, so a destroy has
+// to disable rather than remove.
+func TestIntegrationIngestionTokenLifecycle(t *testing.T) {
+	c := integrationClient(t)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+
+	name := uniqueName("tf_it_token")
+	desc := "integration test"
+	created, err := c.CreateIngestionToken(ctx, org, CreateIngestionTokenAPI{Name: name, Description: &desc})
+	if err != nil {
+		t.Fatalf("CreateIngestionToken: %v", err)
+	}
+	t.Cleanup(func() { _ = c.SetIngestionTokenEnabled(ctx, org, name, false) })
+
+	if created.Token == "" {
+		t.Error("create returned no token value; the secret is only available here and in the listing")
+	}
+	if !created.Enabled {
+		t.Error("a new token should be enabled")
+	}
+
+	got, err := c.GetIngestionToken(ctx, org, name)
+	if err != nil {
+		t.Fatalf("GetIngestionToken: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetIngestionToken returned nothing for a token that was just created")
+	}
+	if got.Token != created.Token {
+		t.Error("the listing reports a different token value than create did")
+	}
+	if got.Description != desc {
+		t.Errorf("description = %q, want %q", got.Description, desc)
+	}
+
+	// Disabling is the only mutation, and the closest thing to deletion the
+	// API offers.
+	if err := c.SetIngestionTokenEnabled(ctx, org, name, false); err != nil {
+		t.Fatalf("SetIngestionTokenEnabled(false): %v", err)
+	}
+	got, err = c.GetIngestionToken(ctx, org, name)
+	if err != nil {
+		t.Fatalf("GetIngestionToken after disable: %v", err)
+	}
+	if got.Enabled {
+		t.Error("token is still enabled after being disabled")
+	}
+
+	// A token that does not exist reads as absent rather than erroring.
+	missing, err := c.GetIngestionToken(ctx, org, uniqueName("tf_it_absent"))
+	if err != nil {
+		t.Fatalf("GetIngestionToken for an absent name: %v", err)
+	}
+	if missing != nil {
+		t.Error("an absent token should read as nil")
+	}
+}
+
+// TestIntegrationAlertPendingPeriod covers the field added in OpenObserve's
+// pending-period change, including the one combination the server refuses.
+func TestIntegrationAlertPendingPeriod(t *testing.T) {
+	c := integrationClient(t)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+
+	stream := uniqueName("tf_it_pp_stream")
+	if err := c.CreateStream(ctx, org, "logs", stream, CreateStreamAPI{}); err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteStream(ctx, org, "logs", stream) })
+
+	tmpl := uniqueName("tf_it_pp_tmpl")
+	if err := c.CreateAlertTemplate(ctx, org, AlertTemplateAPI{
+		Name: tmpl, Body: `{"text":"{alert_name}"}`, TemplateType: "http",
+	}); err != nil {
+		t.Fatalf("CreateAlertTemplate: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteAlertTemplate(ctx, org, tmpl) })
+
+	dest := uniqueName("tf_it_pp_dest")
+	if err := c.CreateAlertDestination(ctx, org, AlertDestinationAPI{
+		Name: dest, DestinationType: "http", URL: "https://example.com/hook",
+		Method: "post", Template: &tmpl, Emails: []string{},
+	}); err != nil {
+		t.Fatalf("CreateAlertDestination: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteAlertDestination(ctx, org, dest) })
+
+	sql := fmt.Sprintf("SELECT count(*) AS total FROM %q", stream)
+	base := AlertAPI{
+		StreamType: "logs", StreamName: stream, Destinations: []string{dest}, Enabled: true,
+		QueryCondition: AlertQueryConditionAPI{QueryType: "sql", SQL: &sql},
+		TriggerCondition: AlertTriggerConditionAPI{
+			Period: 10, Operator: ">=", Threshold: 1, Frequency: 5,
+			FrequencyType: "minutes", AlignTime: true,
+		},
+	}
+
+	withPending := base
+	withPending.Name = uniqueName("tf-it-pending")
+	withPending.PendingPeriodSec = 120
+	alertID, err := c.CreateAlert(ctx, org, "default", withPending)
+	if err != nil {
+		t.Fatalf("CreateAlert with a pending period: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteAlert(ctx, org, alertID) })
+
+	alert, err := c.GetAlert(ctx, org, alertID)
+	if err != nil {
+		t.Fatalf("GetAlert: %v", err)
+	}
+	if alert.PendingPeriodSec != 120 {
+		t.Errorf("pending_period_sec = %d, want 120", alert.PendingPeriodSec)
+	}
+
+	// A real-time alert has no schedule to wait across, and the server says so
+	// rather than ignoring the field.
+	realtime := base
+	realtime.Name = uniqueName("tf-it-pending-rt")
+	realtime.IsRealTime = true
+	realtime.PendingPeriodSec = 60
+	realtime.QueryCondition = AlertQueryConditionAPI{
+		QueryType:  "custom",
+		Conditions: []byte(`{"and":[{"column":"level","operator":"=","value":"error","ignore_case":false}]}`),
+	}
+	if _, err := c.CreateAlert(ctx, org, "default", realtime); err == nil {
+		t.Error("a real-time alert with a pending period was accepted; expected a refusal")
+	} else if !strings.Contains(err.Error(), "pending period") {
+		t.Errorf("unexpected error for a real-time pending period: %v", err)
+	}
+}
+
+// TestIntegrationAlertUnaryOperators pins the operator spelling the v2 API
+// accepts.
+//
+// Its request model declares the word-shaped operators with no serde rename,
+// unlike the internal storage model which uses snake_case with PascalCase
+// aliases. Sending `is_not_empty` is rejected outright, so the provider must
+// offer the PascalCase forms and only those.
+func TestIntegrationAlertUnaryOperators(t *testing.T) {
+	c := integrationClient(t)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+
+	stream := uniqueName("tf_it_unary_stream")
+	if err := c.CreateStream(ctx, org, "metrics", stream, CreateStreamAPI{}); err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteStream(ctx, org, "metrics", stream) })
+
+	tmpl := uniqueName("tf_it_unary_tmpl")
+	if err := c.CreateAlertTemplate(ctx, org, AlertTemplateAPI{
+		Name: tmpl, Body: `{"text":"{alert_name}"}`, TemplateType: "http",
+	}); err != nil {
+		t.Fatalf("CreateAlertTemplate: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteAlertTemplate(ctx, org, tmpl) })
+
+	dest := uniqueName("tf_it_unary_dest")
+	if err := c.CreateAlertDestination(ctx, org, AlertDestinationAPI{
+		Name: dest, DestinationType: "http", URL: "https://example.com/hook",
+		Method: "post", Template: &tmpl, Emails: []string{},
+	}); err != nil {
+		t.Fatalf("CreateAlertDestination: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteAlertDestination(ctx, org, dest) })
+
+	promql := "up"
+	newAlert := func(operator string) AlertAPI {
+		return AlertAPI{
+			Name: uniqueName("tf-it-unary"), StreamType: "metrics", StreamName: stream,
+			Destinations: []string{dest}, Enabled: true,
+			QueryCondition: AlertQueryConditionAPI{
+				QueryType: "promql", PromQL: &promql,
+				PromQLCondition: &AlertConditionAPI{
+					Column: "value", Operator: operator, Value: []byte(`""`),
+				},
+			},
+			TriggerCondition: AlertTriggerConditionAPI{
+				Period: 5, Operator: ">=", Threshold: 1, Frequency: 5,
+				FrequencyType: "minutes", AlignTime: true,
+			},
+		}
+	}
+
+	for _, op := range []string{"IsNull", "IsNotNull", "IsEmpty", "IsNotEmpty"} {
+		id, err := c.CreateAlert(ctx, org, "default", newAlert(op))
+		if err != nil {
+			t.Errorf("operator %q was rejected: %v", op, err)
+			continue
+		}
+		t.Cleanup(func() { _ = c.DeleteAlert(ctx, org, id) })
+	}
+
+	// The snake_case spelling belongs to the storage model, not the wire.
+	if _, err := c.CreateAlert(ctx, org, "default", newAlert("is_not_empty")); err == nil {
+		t.Error("snake_case `is_not_empty` was accepted; the provider's operator list assumes it is not, " +
+			"so if this now works the list should offer both spellings")
+	}
+}
+
+// TestIntegrationSyntheticLifecycle covers synthetic checks. It skips when the
+// feature is switched off, since the routes are not registered at all then.
+func TestIntegrationSyntheticLifecycle(t *testing.T) {
+	c := integrationClient(t)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+
+	catalog, err := c.ListSyntheticLocations(ctx, org)
+	if err != nil {
+		if isSyntheticsDisabled(err) {
+			t.Skip("synthetics are disabled on this server; set ZO_SYNTHETICS_ENABLED=true to run this")
+		}
+		t.Fatalf("ListSyntheticLocations: %v", err)
+	}
+	if len(catalog.Locations) == 0 {
+		t.Skip("no synthetic locations registered on this deployment, so no check can be created")
+	}
+	if len(catalog.Devices) == 0 {
+		t.Error("the locations endpoint reported no devices; a browser check has nothing to run against")
+	}
+
+	locations := make([]string, 0, 1)
+	locations = append(locations, catalog.Locations[0].ID)
+
+	name := uniqueName("tf_it_synthetic")
+	id, err := c.CreateSynthetic(ctx, org, "default", SyntheticAPI{
+		Name:         name,
+		Description:  "integration test",
+		CheckType:    "http",
+		Target:       "https://example.com",
+		Config:       []byte("{}"),
+		Frequency:    SyntheticFrequencyAPI{FrequencyType: "minutes", Interval: 5},
+		Locations:    locations,
+		Enabled:      true,
+		AlertIfFails: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateSynthetic: %v", err)
+	}
+	if id == "" {
+		t.Fatal("CreateSynthetic returned no ID; the create response carries the check itself, not an envelope")
+	}
+	t.Cleanup(func() { _ = c.DeleteSynthetic(ctx, org, id) })
+
+	check, err := c.GetSynthetic(ctx, org, id)
+	if err != nil {
+		t.Fatalf("GetSynthetic: %v", err)
+	}
+	if check == nil {
+		t.Fatal("GetSynthetic returned nothing for a check that was just created")
+	}
+	if check.CheckType != "http" || check.Target != "https://example.com" {
+		t.Errorf("check = %+v, want the configured type and target", check)
+	}
+
+	// The update body has to carry the folder. Without it the server fails a
+	// foreign key with no hint that a folder was what it wanted.
+	check.Description = "updated"
+	if err := c.UpdateSynthetic(ctx, org, id, *check); err != nil {
+		t.Fatalf("UpdateSynthetic: %v", err)
+	}
+	updated, err := c.GetSynthetic(ctx, org, id)
+	if err != nil {
+		t.Fatalf("GetSynthetic after update: %v", err)
+	}
+	if updated.Description != "updated" {
+		t.Errorf("description = %q, want updated", updated.Description)
+	}
+
+	// Enabling is its own endpoint rather than a field on the update body.
+	if err := c.SetSyntheticEnabled(ctx, org, id, false); err != nil {
+		t.Fatalf("SetSyntheticEnabled: %v", err)
+	}
+	paused, err := c.GetSynthetic(ctx, org, id)
+	if err != nil {
+		t.Fatalf("GetSynthetic after disable: %v", err)
+	}
+	if paused.Enabled {
+		t.Error("check is still enabled after being paused")
+	}
+
+	found, err := c.FindSyntheticByName(ctx, org, name)
+	if err != nil {
+		t.Fatalf("FindSyntheticByName: %v", err)
+	}
+	if found == nil || found.ID != id {
+		t.Errorf("FindSyntheticByName = %+v, want the check %q", found, id)
+	}
+}

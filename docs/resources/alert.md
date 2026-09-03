@@ -209,6 +209,11 @@ resource "openobserve_alert" "burning_fast" {
 - `is_real_time` (Boolean) Evaluate as data arrives instead of on a schedule.
 - `org_id` (String) Organization the alert belongs to. Defaults to the provider's `org_id`.
 - `owner` (String) Email of the alert owner. Defaults to the account the provider authenticates as.
+- `pending_period_sec` (Number) How long the condition must hold before the alert fires, in seconds.
+
+Zero, the default, fires on the first evaluation that breaches. A pending period rides out a brief spike: the condition has to still be true this many seconds later. It is the difference between paging on one slow minute and paging on a sustained problem.
+
+Not accepted on a real-time alert, which has no schedule to wait across.
 - `priority` (Number) Triage priority from 1 (most urgent) to 5. Display metadata only; it does not affect when the alert fires.
 - `query_condition` (Block, Optional) What the alert evaluates. (see [below for nested schema](#nestedblock--query_condition))
 - `row_template` (String) Template applied to each matched row when rendering `{rows}` in the message.
@@ -265,8 +270,12 @@ Optional:
 
 - `function` (String) Aggregate function: `avg`, `min`, `max`, `sum`, `count`, `median`, or a percentile such as `p95`.
 - `group_by` (List of String) Columns to group by before aggregating.
+
+On a `sql` multi-alert this can be left empty and the server fills it in from the query's own GROUP BY, so the value read back may differ from the empty list that was sent.
 - `having` (Block, Optional) Critical threshold applied to the aggregate value. (see [below for nested schema](#nestedblock--query_condition--aggregation--having))
-- `multi_alert` (Boolean) Evaluate and notify per group instead of collapsing to a single result. Requires a non-empty `group_by`.
+- `multi_alert` (Boolean) Evaluate and notify per group instead of collapsing to a single result.
+
+For a `custom` alert the group is the `group_by` column set, which must be non-empty. A `sql` alert may leave `group_by` empty: the grouping comes from the query's own GROUP BY, and `having.column` names the column carrying the value to compare.
 - `warning_value` (Number) Warning-level threshold for the aggregate, sharing the operator and column of `having`. Must be strictly less severe than the critical value.
 
 <a id="nestedblock--query_condition--aggregation--having"></a>
@@ -276,8 +285,16 @@ Optional:
 
 - `column` (String) Column the comparison reads.
 - `ignore_case` (Boolean) Compare case-insensitively. Only meaningful for string comparisons.
-- `operator` (String) Comparison operator: `=`, `!=`, `>`, `>=`, `<`, `<=`, `Contains`, or `NotContains`.
+- `operator` (String) Comparison operator.
+
+Comparing: `=`, `!=`, `>`, `>=`, `<`, `<=`, `Contains`, `NotContains`.
+
+Testing the column alone: `IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`. These are unary, so they take no `value`. `IsEmpty` also matches a null, which is usually what you want when a field may be either absent or blank.
+
+The word-shaped operators are PascalCase because that is the only spelling the API accepts for them.
 - `value` (String) Value to compare against. A value that parses as a number is sent as a JSON number; anything else is sent as a JSON string.
+
+Omit it with a unary operator (`IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`), which tests the column itself.
 
 
 
@@ -296,8 +313,16 @@ Optional:
 
 - `column` (String) Column the comparison reads.
 - `ignore_case` (Boolean) Compare case-insensitively. Only meaningful for string comparisons.
-- `operator` (String) Comparison operator: `=`, `!=`, `>`, `>=`, `<`, `<=`, `Contains`, or `NotContains`.
+- `operator` (String) Comparison operator.
+
+Comparing: `=`, `!=`, `>`, `>=`, `<`, `<=`, `Contains`, `NotContains`.
+
+Testing the column alone: `IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`. These are unary, so they take no `value`. `IsEmpty` also matches a null, which is usually what you want when a field may be either absent or blank.
+
+The word-shaped operators are PascalCase because that is the only spelling the API accepts for them.
 - `value` (String) Value to compare against. A value that parses as a number is sent as a JSON number; anything else is sent as a JSON string.
+
+Omit it with a unary operator (`IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`), which tests the column itself.
 
 
 <a id="nestedblock--query_condition--slo_condition"></a>

@@ -56,6 +56,7 @@ type CompositeAlertResourceModel struct {
 	Workflows             types.Set    `tfsdk:"workflows"`
 	Priority              types.Int64  `tfsdk:"priority"`
 	Tags                  types.Set    `tfsdk:"tags"`
+	PendingPeriodSec      types.Int64  `tfsdk:"pending_period_sec"`
 	ChildAlertIDs         types.List   `tfsdk:"child_alert_ids"`
 	SchedulerJobPresent   types.Bool   `tfsdk:"scheduler_job_present"`
 }
@@ -189,6 +190,16 @@ func (r *CompositeAlertResource) Schema(_ context.Context, _ resource.SchemaRequ
 				ElementType: types.StringType,
 				Description: "Selection tags, for example `prod` or `service:checkout`.",
 			},
+			"pending_period_sec": schema.Int64Attribute{
+				Optional: true,
+				Computed: true,
+				Default:  int64default.StaticInt64(0),
+				Description: "How long the expression must stay true before the composite fires, in seconds.\n\n" +
+					"Zero, the default, fires as soon as the expression becomes true. A pending period rides " +
+					"out a momentary coincidence, which matters more here than on an ordinary alert: two " +
+					"children happening to be true in the same instant is not the same as both being true " +
+					"for a minute.",
+			},
 			"child_alert_ids": schema.ListAttribute{
 				Computed:    true,
 				ElementType: types.StringType,
@@ -219,6 +230,14 @@ func (r *CompositeAlertResource) ValidateConfig(ctx context.Context, req resourc
 	if model.Expression.IsNull() || model.Expression.IsUnknown() {
 		return
 	}
+	if knownAndSet(model.PendingPeriodSec) && model.PendingPeriodSec.ValueInt64() < 0 {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("pending_period_sec"),
+			"Pending period cannot be negative",
+			"`pending_period_sec` must be zero or greater. Zero fires as soon as the expression becomes true.",
+		)
+	}
+
 	if _, _, err := validateCompositeExpression(model.Expression.ValueString()); err != nil {
 		resp.Diagnostics.AddAttributeError(
 			path.Root("expression"),
@@ -423,6 +442,7 @@ func (r *CompositeAlertResource) bodyFromModel(ctx context.Context, model *Compo
 		ContextAttrs:     stringsFromMap(ctx, model.ContextAttributes, diags),
 		TriggerCondition: CompositeTriggerAPI{Silence: model.Silence.ValueInt64()},
 		CreatesIncident:  model.CreatesIncident.ValueBool(),
+		PendingPeriodSec: model.PendingPeriodSec.ValueInt64(),
 		Workflows:        stringsFromSet(ctx, model.Workflows, diags),
 		Priority:         optInt64(model.Priority),
 		Tags:             stringsFromSet(ctx, model.Tags, diags),
@@ -453,6 +473,7 @@ func (r *CompositeAlertResource) applyToModel(ctx context.Context, api *Composit
 	model.Template = stringFromPtr(api.Template)
 	model.Priority = int64FromPtr(api.Priority)
 	model.SchedulerJobPresent = boolFromPtr(api.SchedulerJobPresent)
+	model.PendingPeriodSec = types.Int64Value(api.PendingPeriodSec)
 
 	if api.Description != nil {
 		model.Description = types.StringValue(*api.Description)

@@ -207,6 +207,20 @@ func stringFromPtr(p *string) types.String {
 	return types.StringValue(*p)
 }
 
+// stringOrNull maps an empty string to null.
+//
+// Optional string fields on a struct without `omitempty` come back as "" when
+// they were never set, and a configuration that leaves them out holds null.
+// Writing "" into such a field makes an imported resource plan an update that
+// changes nothing. This is for populating a model from a server response; it is
+// wrong for a value a configuration owns, where "" may be a deliberate choice.
+func stringOrNull(s string) types.String {
+	if s == "" {
+		return types.StringNull()
+	}
+	return types.StringValue(s)
+}
+
 func int64FromPtr(p *int64) types.Int64 {
 	if p == nil {
 		return types.Int64Null()

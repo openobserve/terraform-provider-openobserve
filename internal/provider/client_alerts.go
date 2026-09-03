@@ -231,6 +231,7 @@ type AlertAPI struct {
 	CreatesIncident  bool                     `json:"creates_incident,omitempty"`
 	Workflows        []string                 `json:"workflows,omitempty"`
 	Deduplication    *AlertDeduplicationAPI   `json:"deduplication,omitempty"`
+	PendingPeriodSec int64                    `json:"pending_period_sec"`
 }
 
 // AlertListItemAPI is one entry of the alerts list response.

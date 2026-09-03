@@ -5,6 +5,101 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-09-03
+
+Synthetic monitoring and ingestion tokens, plus alert changes that came out of
+re-reading the server's alert models.
+
+### Added
+
+- **`openobserve_synthetic`**: checks that probe a target from outside your
+  infrastructure. Five types, `http`, `tcp`, `tls`, `ssh` and `browser`, sharing
+  a schedule, probe locations, retry policy and alert destinations. Type
+  specific settings live in a `config` JSON document rather than five sets of
+  modelled blocks, because the types share almost nothing; the provider compares
+  it as JSON, so server side key reordering and defaults do not read as drift.
+  Browser checks add `collect_rum_data` and `session_replay`, which are rejected
+  during `plan` on any other type.
+
+  Authentication is a flat `auth` block with a `type` discriminator rather than
+  one block per kind. A nested block combined with `dynamic` produces a present
+  object full of unknowns rather than a null, which makes any validation that
+  tests for absence fire wrongly.
+
+  Requires `ZO_SYNTHETICS_ENABLED=true`. When it is off the routes are not
+  registered, so every path answers 404 and a missing check is indistinguishable
+  from a disabled feature by status code alone. The provider tells the two apart
+  and says which it is.
+
+- **`openobserve_ingestion_token`**: credentials for collectors, agents and SDKs
+  sending data in, as distinct from a service account, which authenticates calls
+  to the management API. OpenObserve has no delete endpoint for these, so
+  removing the resource disables the token and warns rather than reporting a
+  deletion that did not happen. The record keeps its name, which means a name
+  cannot be reused; the warning says so.
+
+- **Three data sources**: `openobserve_synthetics` and
+  `openobserve_synthetic_locations` for adopting checks and discovering where
+  they can run, and `openobserve_ingestion_tokens` for auditing what is issued.
+  The token data source deliberately reports names, descriptions and status but
+  **not token values**: a data source that handed out live ingestion credentials
+  to anything able to read the organization would be a poor default.
+
+- **`pending_period_sec` on alerts and composite alerts.** The condition must
+  hold for this long before the alert fires, which is how a single spiky
+  evaluation is stopped from paging someone. Rejected on real time alerts, which
+  evaluate per record and have no notion of a condition persisting.
+
+- **Four unary comparison operators**: `IsNull`, `IsNotNull`, `IsEmpty` and
+  `IsNotEmpty`, alongside the existing `Contains` and `NotContains`. These take
+  no `value`, so `value` is now optional on a condition.
+
+- **Guides for synthetic monitoring and ingestion tokens** on the Registry, and
+  matching reference files plus a runnable example in the Claude skill.
+
+### Fixed
+
+- **Comparison operators are PascalCase.** The v2 alert API models them as an
+  enum with exact names, so the snake_case spellings are rejected outright. The
+  provider now pins the accepted set and an integration test asserts that
+  snake_case is refused, rather than discovering it in a user's apply.
+
+- **`group_by` on an alert no longer drifts.** The server derives it from the
+  SQL when it is not set, so a configuration that omitted it planned a change on
+  every run. It is now `Computed` as well as `Optional`.
+
+- **Synthetic cookies and variables are read back.** They were written but never
+  populated on read, so an imported check planned a spurious update that added
+  them. As with `auth`, they are filled from the server only when the model has
+  none, so a configured secret is never overwritten with the server's redaction
+  of it.
+
+- **`wait_before_retry_secs` no longer plans as unknown**, and defaults to 5 to
+  match the server. It was the only retry attribute without a default, so an
+  unset value went to `known after apply` and the provider then sent 0.
+
+- **Empty strings from the server no longer read as configuration.** An
+  optional field the server returns as `""` was written into state as `""` while
+  a configuration that omitted it held null, so an imported synthetic planned an
+  update that changed nothing.
+
+### Notes
+
+Two server behaviours that look like provider bugs and are not:
+
+- A deleted stream holds its name until the data retention job clears the
+  marker, on `ZO_COMPACT_DATA_RETENTION_INTERVAL` (3600 seconds by default).
+  Until then recreating it fails with `stream [name] is being deleted`, so
+  destroy-then-apply cycles fail on streams.
+- A synthetic check needs a folder with `folder_type = "synthetics"`. An
+  `alerts` folder fails with an opaque `FOREIGN KEY constraint failed (787)`.
+  This cuts against SLOs, which live in alert folders for want of a type of
+  their own. Both are documented in the guides and the skill's error reference.
+
+Every resource, data source and example in the repository and the skill was
+applied against a live server before release, including the full 28 resource
+configuration, its idempotency and import round trips, and 20 integration tests.
+
 ## [1.3.1] - 2026-08-25
 
 Documentation only. No provider behaviour changed, and the resource and data
@@ -396,6 +491,7 @@ a stream or dashboard onto the new schema without touching the server.
 - Comprehensive examples for all resources and data sources
 - Apache 2.0 license
 
+[1.4.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.4.0
 [1.3.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.3.1
 [1.3.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.3.0
 [1.2.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.2.1

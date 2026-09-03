@@ -102,6 +102,25 @@ These come from the provider during `plan`, before any request is made.
 | `child ... referenced more than once` | Duplicates are rejected, not deduplicated |
 | `Provider produced inconsistent result after apply` | A provider bug. Report it with the resource type and the attribute named |
 
+## Streams, tokens, and synthetics
+
+| Message fragment | Meaning |
+|---|---|
+| `stream [x] is being deleted` | The stream was deleted and its marker has not cleared yet. The data retention job clears it on `ZO_COMPACT_DATA_RETENTION_INTERVAL`, 3600s by default. Nothing to fix; wait, or use a different name. This is why destroy-then-apply cycles fail on streams |
+| `Token with name 'x' already exists in this org` | An ingestion token with that name was disabled rather than deleted, and the record still holds the name. Pick a new name; the old one cannot be reused |
+| `validation: config: this check needs up to Xm per run, which is over the Ym check budget` | A synthetic check's worst case exceeds `ZO_SYNTHETICS_MAX_CHECK_BUDGET_SECS`. Lower `retries`, shorten `config.journey_budget_ms`, or drop a browser/device combo |
+| `config.steps[0]: first step must be 'navigate'` | A browser journey has to start by going somewhere |
+| `config.steps[n]: missing field 'id'` | Every journey step needs a stable unique `id` |
+| `config.steps[n]: 'assert' step requires an 'assertion'` | Kinds: `element_visible`, `element_not_visible`, `element_text`, `url_matches`, `page_title`, `element_attribute` |
+| `config.steps[n]: 'fill' step requires a 'value'` | `fill` and `select` both need one |
+| `FOREIGN KEY constraint failed` / SQLite `787` on a synthetic **create** | The folder is the wrong type. A check needs `folder_type = "synthetics"`; an `alerts` folder fails with this instead of anything naming the folder |
+| `FOREIGN KEY constraint failed` / SQLite `787` on a synthetic **update** | The update body must carry `folder_id`. The provider does this; seeing it means a provider bug |
+| A bare `404` on every synthetics path | The feature is off. The routes are not registered unless `ZO_SYNTHETICS_ENABLED=true`, so this is indistinguishable from a missing check by status alone. The provider adds a diagnostic saying so |
+
+A synthetic check that saves successfully but never runs is usually assigned to
+a location whose `status` is `pending`, meaning no agent has checked in. Read
+`openobserve_synthetic_locations` and look at `status` and `enabled`.
+
 ## Not an API error
 
 **SQLite `code: 517`** is write contention on a local single-node metastore,

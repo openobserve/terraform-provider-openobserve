@@ -119,6 +119,27 @@ conditions = jsonencode({
 
 `custom` is also the family that supports `aggregation`; see section 5.
 
+#### Operators, and their exact spelling
+
+```
+=  !=  >  >=  <  <=  Contains  NotContains  IsNull  IsNotNull  IsEmpty  IsNotEmpty
+```
+
+**The word operators are PascalCase and nothing else is accepted.** The v2 alert
+API models them as an enum with those exact names, so `contains`, `not_contains`
+and `is_null` are rejected outright rather than being normalised.
+
+The four `Is*` operators are **unary**: they take no `value`, and supplying one
+is meaningless. Omit the key:
+
+```hcl
+conditions = jsonencode({
+  or = [
+    { column = "trace_id", operator = "IsNotEmpty", ignore_case = false },
+  ]
+})
+```
+
 ### `promql`
 
 ```hcl
@@ -186,20 +207,35 @@ It round-trips unchanged either way, so this never shows as drift.
 
 ```hcl
 trigger_condition {
-  period            = 15        # lookback window, minutes
-  operator          = ">="      # = != > >= < <= Contains NotContains
-  threshold         = 100
-  warning_threshold = 50
-  notify_on_warning = false     # record warnings without paging
-  frequency         = 5         # evaluate every N minutes
-  frequency_type    = "minutes" # minutes | cron
-  cron              = ""
-  timezone          = "UTC"
-  silence           = 60        # stay quiet N minutes after firing
-  align_time        = true      # snap windows to period boundaries
-  tolerance_in_secs = 0
+  period             = 15        # lookback window, minutes
+  operator           = ">="      # see the operator list in section 3
+  threshold          = 100
+  warning_threshold  = 50
+  notify_on_warning  = false     # record warnings without paging
+  frequency          = 5         # evaluate every N minutes
+  frequency_type     = "minutes" # minutes | cron
+  cron               = ""
+  timezone           = "UTC"
+  silence            = 60        # stay quiet N minutes after firing
+  align_time         = true      # snap windows to period boundaries
+  tolerance_in_secs  = 0
+  pending_period_sec = 0         # must stay breached this long before firing
 }
 ```
+
+### `pending_period_sec`
+
+The condition has to hold continuously for this many seconds before the alert
+fires. It is how you stop a single spiky evaluation paging someone: set it to a
+small multiple of `frequency` so a transient breach that recovers on the next
+evaluation never notifies.
+
+Defaults to 0, meaning fire on the first breach. Negative values are rejected
+during `plan`.
+
+**It is meaningless on a real-time alert** and the provider rejects the
+combination, because a real-time alert evaluates per record and has no notion of
+a condition persisting across evaluations.
 
 For cron scheduling:
 

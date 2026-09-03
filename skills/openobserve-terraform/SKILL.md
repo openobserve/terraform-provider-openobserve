@@ -1,6 +1,6 @@
 ---
 name: openobserve-terraform
-description: Write, review, and debug Terraform or OpenTofu configuration for OpenObserve using the openobserve/openobserve provider. Covers streams, folders, dashboards, alerts (SQL, PromQL, aggregation, SLO, composite), service level objectives, pipelines, VRL functions, pipeline destinations, users, service accounts, roles, and groups, plus import, drift, and decoding OpenObserve API errors. Use whenever a task involves the openobserve Terraform provider, an openobserve_* resource or data source, or managing OpenObserve configuration as code.
+description: Write, review, and debug Terraform or OpenTofu configuration for OpenObserve using the openobserve/openobserve provider. Covers streams, folders, dashboards, alerts (SQL, PromQL, aggregation, SLO, composite), service level objectives, pipelines, VRL functions, pipeline destinations, synthetic monitoring, ingestion tokens, users, service accounts, roles, and groups, plus import, drift, and decoding OpenObserve API errors. Use whenever a task involves the openobserve Terraform provider, an openobserve_* resource or data source, or managing OpenObserve configuration as code.
 ---
 
 # OpenObserve Terraform provider
@@ -13,8 +13,10 @@ stated, it is because the server rejected the alternative.
 Two questions decide most of the work:
 
 1. **Which resource?** See the inventory below.
-2. **Is this open source or Enterprise?** Roles and groups need Enterprise with
-   OpenFGA. Everything else, including SLOs, works on both.
+2. **Is this open source or Enterprise, and which features are switched on?**
+   Roles and groups need Enterprise with OpenFGA. Synthetics needs
+   `ZO_SYNTHETICS_ENABLED=true` on either edition. Everything else, including
+   SLOs, works on both with no flag.
 
 If the answer to either is unclear from the task, read the relevant reference
 file before writing HCL. Guessing at the shape of `query_condition`, an SLO
@@ -28,7 +30,7 @@ terraform {
   required_providers {
     openobserve = {
       source  = "openobserve/openobserve"
-      version = "~> 1.3"
+      version = "~> 1.4"
     }
   }
 }
@@ -56,7 +58,7 @@ needs Terraform 1.0+ or any OpenTofu version.
 
 ## Resource inventory
 
-16 resources:
+18 resources:
 
 | Resource | Purpose |
 |---|---|
@@ -76,13 +78,21 @@ needs Terraform 1.0+ or any OpenTofu version.
 | `openobserve_function` | VRL or JavaScript transforms used by pipelines |
 | `openobserve_pipeline_destination` | An external endpoint a pipeline forwards to |
 | `openobserve_pipeline` | A graph that transforms records in flight |
+| `openobserve_ingestion_token` | A credential for a collector or agent sending data in |
+| `openobserve_synthetic` ‡ | An HTTP, TCP, TLS, SSH, or browser check run from probe locations |
 
-30 data sources: singular and plural forms of the above, plus
+33 data sources: singular and plural forms of the above, plus
 `openobserve_user_roles`, `openobserve_resources` †,
-`openobserve_composite_alert_references`, and `openobserve_pipelines`.
+`openobserve_composite_alert_references`, `openobserve_pipelines`, and
+`openobserve_synthetic_locations` ‡.
 
 † Enterprise with OpenFGA (`ZO_OPENFGA_ENABLED=true`). On open source these
 return a diagnostic naming the feature, not a bare HTTP 403.
+
+‡ Requires `ZO_SYNTHETICS_ENABLED=true`. When it is off the routes are not
+registered at all, so every path answers 404 and a missing check is
+indistinguishable from a disabled feature. The provider detects this and says
+which it is.
 
 Every resource supports `terraform import`.
 
@@ -99,6 +109,8 @@ purpose; do not reconstruct their content from memory.
 | Alerts that combine other alerts | `references/composite-alerts.md` |
 | SLOs, indicators, error budgets, burn-rate alerts | `references/slos.md` |
 | Pipelines, VRL functions, pipeline destinations | `references/pipelines.md` |
+| Synthetic checks, the check budget, browser journeys | `references/synthetics.md` |
+| Ingestion tokens, and why they cannot be deleted | `references/ingestion-tokens.md` |
 | Users, service accounts, roles, groups, permissions | `references/iam.md` |
 | Importing existing objects, or a plan that will not settle | `references/import-and-drift.md` |
 | An API error you want decoded | `references/errors.md` |
@@ -141,8 +153,12 @@ be used by an alert. Always create the pair.
 a stream that does not exist fails with a bare `HTTP 404: Stream <name> not
 found`. In a live system ingestion creates streams; in a fresh org, declare them.
 
-**SLOs live in alert folders.** There is no SLO folder type. `folder_id` on an
-`openobserve_slo` refers to an `openobserve_folder` with `folder_type = "alerts"`.
+**SLOs live in alert folders. Synthetics do not.** There is no SLO folder type,
+so `folder_id` on an `openobserve_slo` refers to a folder with
+`folder_type = "alerts"`. Synthetics *do* have their own type, and pointing a
+check at an alert folder fails with an opaque
+`FOREIGN KEY constraint failed (787)`. The four types are `dashboards`,
+`alerts`, `reports`, `synthetics`.
 
 **An SLO alert has no count gate.** Omit `trigger_condition.threshold` and
 `operator` entirely. Every other family uses them; this one rejects them.
@@ -170,6 +186,26 @@ must be numeric.
 **Expect one diff on the first plan after `terraform import`.** Import populates
 state from the server with no configuration to compare against. Applying
 converges and recreates nothing.
+
+**An ingestion token cannot be deleted, and its name cannot be reused.** There
+is no delete endpoint, so removing the resource disables the token instead and
+leaves the record behind. Because names are unique, re-adding a token with the
+same name then fails. Cycling a credential means a new name, not the old one.
+
+**A deleted stream blocks its own name for up to an hour.** Deletion marks the
+stream and the data retention job clears the marker, on
+`ZO_COMPACT_DATA_RETENTION_INTERVAL` (3600s by default). Until then, recreating
+it fails with `stream [name] is being deleted`. This makes destroy-then-apply
+cycles fail on streams, which is expected rather than a provider bug.
+
+**A synthetic check's run time is capped by a fixed budget, not by its
+schedule.** `ZO_SYNTHETICS_MAX_CHECK_BUDGET_SECS` (840s) bounds
+`combos x (attempts x per_attempt + retries x wait_before_retry_secs)`. Running
+a check hourly does not buy it more room than running it every minute.
+
+**Comparison operators on alert conditions are PascalCase.** `Contains`,
+`NotContains`, `IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`. The snake_case
+spellings are rejected. The four `Is*` operators are unary: omit `value`.
 
 ## Verifying work
 

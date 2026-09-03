@@ -30,7 +30,28 @@ var (
 )
 
 // comparisonOperators are the operators accepted in alert thresholds and conditions.
-var comparisonOperators = []string{"=", "!=", ">", ">=", "<", "<=", "Contains", "NotContains"}
+//
+// The word-shaped operators are PascalCase because that is the only spelling
+// the v2 alerts API accepts. Its request model declares them with no serde
+// rename, unlike the internal storage model, which uses snake_case with
+// PascalCase aliases. Sending `is_not_empty` is rejected outright:
+//
+//	unknown variant `is_not_empty`, expected one of `=`, `!=`, `>`, `>=`, `<`,
+//	`<=`, `Contains`, `NotContains`, `IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`
+var comparisonOperators = []string{
+	"=", "!=", ">", ">=", "<", "<=",
+	"Contains", "NotContains",
+	"IsNull", "IsNotNull", "IsEmpty", "IsNotEmpty",
+}
+
+// unaryOperators test a column without comparing it to anything, so a
+// condition using one needs no `value`.
+var unaryOperators = map[string]bool{
+	"IsNull":     true,
+	"IsNotNull":  true,
+	"IsEmpty":    true,
+	"IsNotEmpty": true,
+}
 
 // aggregationFunctions are the aggregate functions a `custom` alert can apply.
 var aggregationFunctions = []string{"avg", "min", "max", "sum", "count", "median", "p50", "p75", "p90", "p95", "p99"}
@@ -68,6 +89,7 @@ type AlertResourceModel struct {
 	Tags              types.Set                   `tfsdk:"tags"`
 	CreatesIncident   types.Bool                  `tfsdk:"creates_incident"`
 	Workflows         types.Set                   `tfsdk:"workflows"`
+	PendingPeriodSec  types.Int64                 `tfsdk:"pending_period_sec"`
 	Deduplication     *AlertDeduplicationModel    `tfsdk:"deduplication"`
 	QueryCondition    *AlertQueryConditionModel   `tfsdk:"query_condition"`
 	TriggerCondition  *AlertTriggerConditionModel `tfsdk:"trigger_condition"`
@@ -163,16 +185,26 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Description: "Column the comparison reads.",
 			},
 			"operator": schema.StringAttribute{
-				Required:    required,
-				Optional:    !required,
-				Description: "Comparison operator: `=`, `!=`, `>`, `>=`, `<`, `<=`, `Contains`, or `NotContains`.",
-				Validators:  []validator.String{stringvalidator.OneOf(comparisonOperators...)},
-			},
-			"value": schema.StringAttribute{
 				Required: required,
 				Optional: !required,
+				Description: "Comparison operator.\n\n" +
+					"Comparing: `=`, `!=`, `>`, `>=`, `<`, `<=`, `Contains`, `NotContains`.\n\n" +
+					"Testing the column alone: `IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`. These are " +
+					"unary, so they take no `value`. `IsEmpty` also matches a null, which is usually what " +
+					"you want when a field may be either absent or blank.\n\n" +
+					"The word-shaped operators are PascalCase because that is the only spelling the API " +
+					"accepts for them.",
+				Validators: []validator.String{stringvalidator.OneOf(comparisonOperators...)},
+			},
+			"value": schema.StringAttribute{
+				// Optional even where the block is required, because a unary
+				// operator has nothing to compare against. ValidateConfig
+				// requires it for every other operator.
+				Optional: true,
 				Description: "Value to compare against. A value that parses as a number is sent as a JSON number; " +
-					"anything else is sent as a JSON string.",
+					"anything else is sent as a JSON string.\n\n" +
+					"Omit it with a unary operator (`IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`), which " +
+					"tests the column itself.",
 			},
 			"ignore_case": schema.BoolAttribute{
 				Optional:    true,
@@ -285,6 +317,16 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				ElementType: types.StringType,
 				Description: "Workflow IDs to trigger when the alert fires.",
 			},
+			"pending_period_sec": schema.Int64Attribute{
+				Optional: true,
+				Computed: true,
+				Default:  int64default.StaticInt64(0),
+				Description: "How long the condition must hold before the alert fires, in seconds.\n\n" +
+					"Zero, the default, fires on the first evaluation that breaches. A pending period rides out " +
+					"a brief spike: the condition has to still be true this many seconds later. It is the " +
+					"difference between paging on one slow minute and paging on a sustained problem.\n\n" +
+					"Not accepted on a real-time alert, which has no schedule to wait across.",
+			},
 			"tz_offset": schema.Int64Attribute{
 				Optional:    true,
 				Computed:    true,
@@ -377,8 +419,12 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 						Attributes: map[string]schema.Attribute{
 							"group_by": schema.ListAttribute{
 								Optional:    true,
+								Computed:    true,
 								ElementType: types.StringType,
-								Description: "Columns to group by before aggregating.",
+								Description: "Columns to group by before aggregating.\n\n" +
+									"On a `sql` multi-alert this can be left empty and the server fills it in " +
+									"from the query's own GROUP BY, so the value read back may differ from " +
+									"the empty list that was sent.",
 							},
 							"function": schema.StringAttribute{
 								Optional:    true,
@@ -391,8 +437,11 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 									"Must be strictly less severe than the critical value.",
 							},
 							"multi_alert": schema.BoolAttribute{
-								Optional:    true,
-								Description: "Evaluate and notify per group instead of collapsing to a single result. Requires a non-empty `group_by`.",
+								Optional: true,
+								Description: "Evaluate and notify per group instead of collapsing to a single result.\n\n" +
+									"For a `custom` alert the group is the `group_by` column set, which must be non-empty. " +
+									"A `sql` alert may leave `group_by` empty: the grouping comes from the query's own " +
+									"GROUP BY, and `having.column` names the column carrying the value to compare.",
 							},
 						},
 						Blocks: map[string]schema.Block{
@@ -667,6 +716,26 @@ func (r *AlertResource) ValidateConfig(ctx context.Context, req resource.Validat
 		}
 	}
 
+	// The server rejects both of these rather than clamping, so catching them
+	// here turns an apply-time 400 into a diagnostic on the offending line.
+	if knownAndSet(config.PendingPeriodSec) {
+		if config.PendingPeriodSec.ValueInt64() < 0 {
+			resp.Diagnostics.AddAttributeError(
+				path.Root("pending_period_sec"),
+				"Pending period cannot be negative",
+				"`pending_period_sec` must be zero or greater. Zero fires on the first breaching evaluation.",
+			)
+		}
+		if config.PendingPeriodSec.ValueInt64() != 0 && config.IsRealTime.ValueBool() {
+			resp.Diagnostics.AddAttributeError(
+				path.Root("pending_period_sec"),
+				"Pending period does not apply to a real-time alert",
+				"A real-time alert evaluates as each record arrives, so there is no schedule to wait across. "+
+					"Remove `pending_period_sec`, or drop `is_real_time`.",
+			)
+		}
+	}
+
 	if config.TriggerCondition != nil &&
 		config.TriggerCondition.FrequencyType.ValueString() == "cron" &&
 		config.TriggerCondition.Cron.IsNull() && !config.TriggerCondition.Cron.IsUnknown() {
@@ -863,24 +932,25 @@ func (r *AlertResource) alertFromModel(ctx context.Context, model *AlertResource
 	}
 
 	alert := AlertAPI{
-		Name:            model.Name.ValueString(),
-		OrgID:           org,
-		StreamType:      model.StreamType.ValueString(),
-		StreamName:      model.StreamName.ValueString(),
-		IsRealTime:      model.IsRealTime.ValueBool(),
-		Destinations:    destinations,
-		Template:        optString(model.Template),
-		ContextAttrs:    stringsFromMap(ctx, model.ContextAttributes, diags),
-		RowTemplate:     model.RowTemplate.ValueString(),
-		RowTemplateType: model.RowTemplateType.ValueString(),
-		CreatesIncident: model.CreatesIncident.ValueBool(),
-		Workflows:       stringsFromSet(ctx, model.Workflows, diags),
-		Description:     model.Description.ValueString(),
-		Enabled:         model.Enabled.ValueBool(),
-		TZOffset:        int32(model.TZOffset.ValueInt64()),
-		Owner:           optString(model.Owner),
-		Priority:        optInt64(model.Priority),
-		Tags:            stringsFromSet(ctx, model.Tags, diags),
+		Name:             model.Name.ValueString(),
+		OrgID:            org,
+		StreamType:       model.StreamType.ValueString(),
+		StreamName:       model.StreamName.ValueString(),
+		IsRealTime:       model.IsRealTime.ValueBool(),
+		Destinations:     destinations,
+		Template:         optString(model.Template),
+		ContextAttrs:     stringsFromMap(ctx, model.ContextAttributes, diags),
+		RowTemplate:      model.RowTemplate.ValueString(),
+		RowTemplateType:  model.RowTemplateType.ValueString(),
+		CreatesIncident:  model.CreatesIncident.ValueBool(),
+		Workflows:        stringsFromSet(ctx, model.Workflows, diags),
+		Description:      model.Description.ValueString(),
+		Enabled:          model.Enabled.ValueBool(),
+		TZOffset:         int32(model.TZOffset.ValueInt64()),
+		Owner:            optString(model.Owner),
+		Priority:         optInt64(model.Priority),
+		PendingPeriodSec: model.PendingPeriodSec.ValueInt64(),
+		Tags:             stringsFromSet(ctx, model.Tags, diags),
 	}
 	if folderID != "" {
 		alert.FolderID = &folderID
@@ -1028,6 +1098,21 @@ func decodeConditionValue(raw json.RawMessage) types.String {
 	return types.StringValue(strings.TrimSpace(string(raw)))
 }
 
+// conditionValueToModel renders a threshold back, keeping the configured value
+// null when the server reports an empty one.
+//
+// A unary operator needs no value, but the server's Condition carries a
+// non-optional `value`, so it stores and echoes an empty string. Writing that
+// back where the configuration deliberately said nothing is an inconsistent
+// result after apply, and would report drift forever besides.
+func conditionValueToModel(prior types.String, raw json.RawMessage) types.String {
+	decoded := decodeConditionValue(raw)
+	if prior.IsNull() && decoded.ValueString() == "" {
+		return types.StringNull()
+	}
+	return decoded
+}
+
 func triggerConditionFromModel(model *AlertTriggerConditionModel) AlertTriggerConditionAPI {
 	frequencyType := model.FrequencyType.ValueString()
 	if frequencyType == "" {
@@ -1110,6 +1195,7 @@ func (r *AlertResource) applyAlertToModel(ctx context.Context, alert *AlertAPI, 
 		}
 	}
 	model.TZOffset = types.Int64Value(int64(alert.TZOffset))
+	model.PendingPeriodSec = types.Int64Value(alert.PendingPeriodSec)
 	model.Template = stringFromPtr(alert.Template)
 	model.Owner = stringFromPtr(alert.Owner)
 	model.Priority = int64FromPtr(alert.Priority)
@@ -1148,8 +1234,10 @@ func queryConditionToModel(ctx context.Context, api *AlertQueryConditionAPI, pri
 		}
 	}
 	var priorHavingIgnoreCase types.Bool
+	var priorHavingValue types.String
 	if prior != nil && prior.Aggregation != nil && prior.Aggregation.Having != nil {
 		priorHavingIgnoreCase = prior.Aggregation.Having.IgnoreCase
+		priorHavingValue = prior.Aggregation.Having.Value
 	}
 
 	out := &AlertQueryConditionModel{
@@ -1178,18 +1266,24 @@ func queryConditionToModel(ctx context.Context, api *AlertQueryConditionAPI, pri
 
 	if api.PromQLCondition != nil {
 		var priorPromQLIgnoreCase types.Bool
+		var priorPromQLValue types.String
 		if prior != nil && prior.PromQLCondition != nil {
 			priorPromQLIgnoreCase = prior.PromQLCondition.IgnoreCase
+			priorPromQLValue = prior.PromQLCondition.Value
 		}
 		out.PromQLCondition = &AlertConditionModel{
 			Column:     types.StringValue(api.PromQLCondition.Column),
 			Operator:   types.StringValue(api.PromQLCondition.Operator),
-			Value:      decodeConditionValue(api.PromQLCondition.Value),
+			Value:      conditionValueToModel(priorPromQLValue, api.PromQLCondition.Value),
 			IgnoreCase: boolPreserveNull(priorPromQLIgnoreCase, api.PromQLCondition.IgnoreCase),
 		}
 	}
 
 	if api.Aggregation != nil {
+		// A SQL multi-alert may be configured with no group_by at all, and the
+		// server answers with the columns it derived from the query. Taking the
+		// server's list is right: it is what the alert actually groups by, and
+		// the attribute is Computed so that it can differ from the config.
 		out.Aggregation = &AlertAggregationModel{
 			GroupBy:      listFromStrings(ctx, api.Aggregation.GroupBy, diags),
 			Function:     types.StringValue(api.Aggregation.Function),
@@ -1198,7 +1292,7 @@ func queryConditionToModel(ctx context.Context, api *AlertQueryConditionAPI, pri
 			Having: &AlertConditionModel{
 				Column:     types.StringValue(api.Aggregation.Having.Column),
 				Operator:   types.StringValue(api.Aggregation.Having.Operator),
-				Value:      decodeConditionValue(api.Aggregation.Having.Value),
+				Value:      conditionValueToModel(priorHavingValue, api.Aggregation.Having.Value),
 				IgnoreCase: boolPreserveNull(priorHavingIgnoreCase, api.Aggregation.Having.IgnoreCase),
 			},
 		}

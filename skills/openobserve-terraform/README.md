@@ -38,6 +38,8 @@ openobserve-terraform/
 │   ├── composite-alerts.md       boolean expressions over other alerts
 │   ├── slos.md                   indicators, error budgets, burn-rate alerts
 │   ├── pipelines.md              pipelines, VRL functions, pipeline destinations
+│   ├── synthetics.md             check types, the check budget, browser journeys
+│   ├── ingestion-tokens.md       collector credentials, and why they never delete
 │   ├── iam.md                    users, service accounts, roles, groups
 │   ├── import-and-drift.md       adoption, reconciliation, plans that will not settle
 │   ├── errors.md                 server errors decoded, with fixes
@@ -47,6 +49,7 @@ openobserve-terraform/
 │   ├── alert-families/           every alert family side by side
 │   ├── composite-alerts/         AND, NOT, nesting, and inspection
 │   ├── slos/                     all three indicators, both alert kinds
+│   ├── synthetics/               HTTP, TLS and browser checks with notification
 │   └── alert-library/            install the community library from its manifest
 └── scripts/
     └── dev-server.sh             throwaway OpenObserve for verification

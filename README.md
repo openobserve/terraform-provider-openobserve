@@ -101,6 +101,8 @@ export OPENOBSERVE_ORG_ID="default"
 | `openobserve_function`            | VRL and JavaScript transforms, compiled by the server on save           |
 | `openobserve_pipeline_destination`| External endpoints a pipeline forwards records to                       |
 | `openobserve_pipeline`            | Graphs that transform records in flight between streams                 |
+| `openobserve_ingestion_token`     | Credentials for collectors and agents sending data in                   |
+| `openobserve_synthetic` ‡         | HTTP, TCP, TLS, SSH, and browser checks run from probe locations        |
 
 ## Data Sources
 
@@ -124,10 +126,17 @@ export OPENOBSERVE_ORG_ID="default"
 | `openobserve_slo(s)`               | One objective with its measurement, or a listing     |
 | `openobserve_function(s)`          | One function with the pipelines using it, or a listing |
 | `openobserve_pipelines`            | Pipelines, with the ids an import needs              |
+| `openobserve_ingestion_tokens`     | Tokens in an organization, without their values      |
+| `openobserve_synthetics` ‡         | Synthetic checks, with the ids an import needs       |
+| `openobserve_synthetic_locations` ‡| Probe locations, browsers, and viewports available   |
 
 † Requires OpenObserve Enterprise with OpenFGA enabled. Against an open-source
 deployment these return a diagnostic saying so rather than an opaque HTTP 403.
 Everything else, including SLOs, works on both editions.
+
+‡ Requires the server to run with `ZO_SYNTHETICS_ENABLED=true`. The routes are
+not registered when it is off, so the provider turns the resulting 404 into a
+diagnostic that says the feature is disabled.
 
 ## Documentation
 
@@ -139,6 +148,9 @@ Full reference and guides are on the
 - [Service level objectives](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/slos): indicators, error budgets, burn-rate alerts
 - [Dashboards](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/dashboards): panel JSON without the guesswork
 - [Roles and groups](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/rbac)
+- [Pipelines](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/pipelines): functions, destinations, and the order they have to be created in
+- [Synthetic monitoring](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/synthetics): check types, the check budget, and browser journeys
+- [Ingestion tokens](https://registry.terraform.io/providers/openobserve/openobserve/latest/docs/guides/ingestion-tokens): issuing and revoking collector credentials
 
 ## Import
 
@@ -161,11 +173,14 @@ terraform import openobserve_slo.example               default/2fXkZ8QlmNbYcV1pR
 terraform import openobserve_function.example          default/redact_email
 terraform import openobserve_pipeline_destination.example default/warehouse
 terraform import openobserve_pipeline.example          default/7497861055431835648
+terraform import openobserve_ingestion_token.example   default/otel-collector
+terraform import openobserve_synthetic.example         default/3Ip9aYhgjr5Ozj5bzb58deBuE2s
 ```
 
 A service account's API token is only ever returned when the account is created
 or its token is rotated, so an imported account has an empty `token`. Change
-`rotate_token` to issue a fresh one.
+`rotate_token` to issue a fresh one. An ingestion token behaves the same way, but
+has no rotation: issue a new one and disable the old.
 
 ## Local Development
 

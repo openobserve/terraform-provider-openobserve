@@ -199,6 +199,12 @@ resource "openobserve_folder" "reliability" {
 > **SLOs live in alert folders.** There is no SLO folder type. An
 > `openobserve_slo` takes a `folder_id` from an `openobserve_folder` with
 > `folder_type = "alerts"`.
+>
+> **Synthetic checks do not.** They have a type of their own and must use it.
+> An `openobserve_synthetic` pointed at an `alerts` folder fails with an opaque
+> `FOREIGN KEY constraint failed (787)` that names nothing useful.
+
+`folder_type` is `RequiresReplace`: a folder cannot change what it holds.
 
 ### Wire details
 
