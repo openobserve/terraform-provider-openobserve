@@ -311,6 +311,39 @@ OPENOBSERVE_ORG_ID=default \
 
 Each test creates uniquely named objects and cleans up after itself.
 
+## Cutting a release
+
+**Every release needs a CHANGELOG entry. This is enforced, not a convention.**
+The release workflow extracts the section for the tag and fails before anything
+is built or signed if it is not there, so a tag without notes produces no
+release at all.
+
+1. Add a section to `CHANGELOG.md` for the version, and a link reference at the
+   foot of the file:
+
+   ```markdown
+   ## [1.5.0] - 2026-10-01
+
+   ### Added
+
+   - What changed, and why it mattered to someone using the provider.
+
+   [1.5.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.5.0
+   ```
+
+2. Check what the release page will say. This is the exact text the workflow
+   publishes:
+
+   ```bash
+   scripts/release-notes.sh v1.5.0
+   ```
+
+3. Commit, tag `v1.5.0`, and push the tag.
+
+Version numbers follow [semantic versioning](https://semver.org): a new
+resource or data source is a minor, a fix is a patch, and anything that breaks
+an existing configuration is a major.
+
 ## Publishing to the Terraform Registry
 
 See [Publishing Providers](https://developer.hashicorp.com/terraform/registry/providers/publishing).

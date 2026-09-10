@@ -17,6 +17,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Runs before anything is built or signed, so a tag with no written
+      # entry fails here rather than publishing a list of commit subjects as
+      # its release notes.
+      - name: Require a CHANGELOG entry
+        run: scripts/release-notes.sh "${GITHUB_REF_NAME}" release-notes.md
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -34,7 +40,7 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean
+          args: release --clean --release-notes=release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
