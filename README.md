@@ -93,9 +93,8 @@ anything extra to install:
 pulumi package add terraform-provider openobserve/openobserve
 ```
 
-That pulls the published provider from the Terraform Registry, generates an SDK
-for your project's language, and installs it. Verified with Pulumi 3.261. In
-TypeScript:
+That generates an SDK for your project's language and installs it. Verified with
+Pulumi 3.261. In TypeScript:
 
 ```ts
 import * as openobserve from "@pulumi/openobserve";
@@ -121,6 +120,17 @@ const stream = new openobserve.Stream("appLogs", {
 
 const locations = openobserve.getSyntheticLocationsOutput({}, { provider });
 ```
+
+Append a version to pin one, for example
+`pulumi package add terraform-provider openobserve/openobserve 1.4.0`.
+
+> **Pulumi resolves through the OpenTofu registry, not the Terraform Registry.**
+> That mirror follows GitHub releases on its own schedule, so a version
+> published in the last few hours may not be there yet and Pulumi will quietly
+> pick the previous one. Asking for a version it does not have fails with
+> `Could not resolve a version from registry.opentofu.org/openobserve/openobserve`.
+> Check <https://registry.opentofu.org/providers/openobserve/openobserve> if you
+> need a specific version right after a release.
 
 ### What changes when you cross the bridge
 
