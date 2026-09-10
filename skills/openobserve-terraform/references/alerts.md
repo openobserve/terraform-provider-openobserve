@@ -104,18 +104,26 @@ query_condition {
 }
 ```
 
-Both the flat form above and the nested grouped form are accepted:
+Groups nest by putting an `or`/`and` object where a condition would go:
 
 ```hcl
 conditions = jsonencode({
-  filterType      = "group"
-  logicalOperator = "AND"
-  conditions = [
+  and = [
     { column = "status", operator = ">=", value = 500, ignore_case = false },
-    { column = "service", operator = "=", value = "checkout", ignore_case = false },
+    { or = [
+      { column = "service", operator = "=", value = "checkout", ignore_case = false },
+      { column = "service", operator = "=", value = "cart", ignore_case = false },
+    ] },
   ]
 })
 ```
+
+`not` is the third form, and it holds a single object rather than an array.
+
+> The UI's `filterType`/`logicalOperator` group shape is **not** accepted by the
+> API. Sending it returns
+> `422 Failed to parse V1 conditions: data did not match any variant of untagged
+> enum ConditionList`. Use the nesting above.
 
 `custom` is also the family that supports `aggregation`; see section 5.
 
@@ -125,19 +133,114 @@ conditions = jsonencode({
 =  !=  >  >=  <  <=  Contains  NotContains  IsNull  IsNotNull  IsEmpty  IsNotEmpty
 ```
 
-**The word operators are PascalCase and nothing else is accepted.** The v2 alert
-API models them as an enum with those exact names, so `contains`, `not_contains`
-and `is_null` are rejected outright rather than being normalised.
+**That list is not one contract, it is four.** The operator attributes differ
+in which operators they accept and what `value` has to be:
 
-The four `Is*` operators are **unary**: they take no `value`, and supplying one
-is meaningless. Omit the key:
+| Where | Word operators? | Spelling returned | `value` |
+|---|---|---|---|
+| `trigger_condition.operator` | **No. Symbols only** | as sent | n/a, uses `threshold` |
+| `slo_condition.operator` | No. `>` and `>=` only | as sent | n/a, uses `critical` |
+| `aggregation.having` | Yes, PascalCase | as sent | **required**, and must parse as a number |
+| `promql_condition` | Yes, PascalCase | as sent | may be omitted; provider sends `""` |
+| `conditions` (JSON string) | Yes, **either** spelling | always snake_case | **required**, even when ignored |
+
+`trigger_condition` compares a row count to a number, so a word operator has
+nothing to mean. The API accepts it and then fails while storing:
+
+```
+HTTP 500: DbError# PutAlert# cannot convert contains into a trigger threshold
+operator
+```
+
+The provider rejects it during `plan` instead, so you should not see that 500.
+
+`having.value` must be present and must parse as a number, whatever the
+operator: an aggregate is a number. That is a constraint on the **value**, not
+the operator. `operator = ">="` with `value = "boom"` fails, and a unary
+operator with a numeric value is accepted. Omitting the value sends `""`, which
+fails the same way:
+
+```
+HTTP 400: Invalid aggregation warning value: aggregation threshold
+(having.value) is not numeric
+```
+
+The provider now rejects both a missing and a non-numeric `having.value` during
+`plan`, so you should not see that 400 either.
+
+The `conditions` document is governed by none of the above. It reaches the
+server as written and is parsed by the storage model behind the untagged V1
+`ConditionList`, which accepts either spelling and rewrites what it stores.
+
+> The echoed snake_case used to be a hard failure. Up to and including 1.4.0
+> the provider stored what came back, so `operator = "Contains"` produced
+> `Provider produced inconsistent result after apply` and could not be applied
+> at all. Later versions keep the configured spelling. On an affected version
+> the workaround is to write the operator in snake_case, which round-trips.
+
+The provider sends `conditions` exactly as you wrote it. The server does not
+store it that way, which is the thing to plan around. Its `Condition` type
+declares `value` as non-optional, so a missing key fails to parse before any
+operator logic runs:
+
+```
+HTTP 422: Failed to deserialize the JSON body into the target type:
+Failed to parse V1 conditions: data did not match any variant of untagged enum
+ConditionList
+```
+
+Note the error names neither the field nor the operator, so it is worth
+recognising by shape.
+
+### What else the round trip changes
+
+Operator spelling is the only rewrite the provider repairs. These are not
+repaired, and each one produces a mismatch that fails the apply:
+
+| You write | The server stores |
+|---|---|
+| a bare array, `[{...}]` | `{"and":[{...}]}` |
+| a nested bare array, `{"or":[[{...}]]}` | `{"or":[{"and":[{...}]}]}` |
+| any key it does not know, such as `id` | dropped |
+| **both** a top-level `or` and a top-level `and` | **only the `or`; the `and` branch is silently discarded** |
+
+The last row is the dangerous one: it returns HTTP 200 having thrown away half
+your predicate. Terraform then fails the apply, which is the only reason you
+find out. **Write one top-level key.** Combine with nesting instead:
+
+```hcl
+conditions = jsonencode({
+  and = [
+    { column = "status", operator = ">=", value = 500, ignore_case = false },
+    { or = [
+      { column = "service", operator = "=", value = "checkout", ignore_case = false },
+      { column = "service", operator = "=", value = "cart", ignore_case = false },
+    ] },
+  ]
+})
+```
+
+These rewrites are deliberately left to surface rather than be absorbed: a
+dropped branch is a changed predicate, not a change of spelling, and hiding it
+would mean quietly monitoring something other than what the configuration says.
 
 ```hcl
 conditions = jsonencode({
   or = [
-    { column = "trace_id", operator = "IsNotEmpty", ignore_case = false },
+    # value = "" is required even though IsNotEmpty ignores it
+    { column = "trace_id", operator = "IsNotEmpty", value = "", ignore_case = false },
   ]
 })
+```
+
+Whereas the modelled attributes take the omission:
+
+```hcl
+promql_condition {
+  column   = "value"
+  operator = "IsNotEmpty"
+  # no value; the provider sends ""
+}
 ```
 
 ### `promql`
@@ -219,11 +322,30 @@ trigger_condition {
   silence            = 60        # stay quiet N minutes after firing
   align_time         = true      # snap windows to period boundaries
   tolerance_in_secs  = 0
-  pending_period_sec = 0         # must stay breached this long before firing
 }
 ```
 
-### `pending_period_sec`
+### `pending_period_sec` is NOT in this block
+
+It is a **top-level attribute on the resource**, a sibling of
+`trigger_condition` rather than a field inside it:
+
+```hcl
+resource "openobserve_alert" "x" {
+  name               = "checkout_errors"
+  pending_period_sec = 60          # here
+
+  trigger_condition {
+    period    = 10
+    operator  = ">="
+    threshold = 1
+    frequency = 5
+  }
+}
+```
+
+Putting it inside `trigger_condition` fails during `plan` with
+`An argument named "pending_period_sec" is not expected here`.
 
 The condition has to hold continuously for this many seconds before the alert
 fires. It is how you stop a single spiky evaluation paging someone: set it to a

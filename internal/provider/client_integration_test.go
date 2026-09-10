@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
 // Integration tests exercise the client against a live OpenObserve instance.
@@ -1731,4 +1734,116 @@ func TestIntegrationSyntheticLifecycle(t *testing.T) {
 	if found == nil || found.ID != id {
 		t.Errorf("FindSyntheticByName = %+v, want the check %q", found, id)
 	}
+}
+
+// TestIntegrationConditionOperatorSpelling pins the round-trip that produced
+// "Provider produced inconsistent result after apply" in 1.4.0 and earlier.
+//
+// The `conditions` document accepts either spelling of a word-shaped operator
+// on write, and always returns snake_case. Storing what came back where the
+// configuration said `Contains` fails the apply outright, so the read path
+// keeps the configured spelling.
+func TestIntegrationConditionOperatorSpelling(t *testing.T) {
+	c := integrationClient(t)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+
+	stream := uniqueName("tf_it_opspell_stream")
+	if err := c.CreateStream(ctx, org, "logs", stream, CreateStreamAPI{}); err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteStream(ctx, org, "logs", stream) })
+
+	tmpl := uniqueName("tf_it_opspell_tmpl")
+	if err := c.CreateAlertTemplate(ctx, org, AlertTemplateAPI{
+		Name: tmpl, Body: `{"text":"{alert_name}"}`, TemplateType: "http",
+	}); err != nil {
+		t.Fatalf("CreateAlertTemplate: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteAlertTemplate(ctx, org, tmpl) })
+
+	dest := uniqueName("tf_it_opspell_dest")
+	if err := c.CreateAlertDestination(ctx, org, AlertDestinationAPI{
+		Name: dest, DestinationType: "http", URL: "https://example.com/hook",
+		Method: "post", Template: &tmpl, Emails: []string{},
+	}); err != nil {
+		t.Fatalf("CreateAlertDestination: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteAlertDestination(ctx, org, dest) })
+
+	for _, sent := range []string{"Contains", "NotContains", "IsNotEmpty"} {
+		t.Run(sent, func(t *testing.T) {
+			conditions := fmt.Sprintf(
+				`{"or":[{"column":"message","operator":%q,"value":"","ignore_case":false}]}`, sent)
+
+			name := uniqueName("tf-it-opspell")
+			id, err := c.CreateAlert(ctx, org, "", AlertAPI{
+				Name: name, StreamType: "logs", StreamName: stream,
+				Destinations: []string{dest}, Enabled: true,
+				QueryCondition: AlertQueryConditionAPI{
+					QueryType: "custom", Conditions: json.RawMessage(conditions),
+				},
+				TriggerCondition: AlertTriggerConditionAPI{
+					Period: 10, Operator: ">=", Threshold: 1, Frequency: 5,
+					FrequencyType: "minutes", AlignTime: true,
+				},
+			})
+			if err != nil {
+				t.Fatalf("CreateAlert(%s): %v", sent, err)
+			}
+			t.Cleanup(func() { _ = c.DeleteAlert(ctx, org, id) })
+
+			got, err := c.GetAlert(ctx, org, id)
+			if err != nil || got == nil {
+				t.Fatalf("GetAlert: %v", err)
+			}
+
+			returned := conditionOperatorOf(t, got.QueryCondition.Conditions)
+
+			// The regression only exists because the server answers with a
+			// different spelling than it was sent. Skipping rather than passing
+			// keeps a server-side change from turning this into a green test
+			// that checks nothing.
+			if returned == sent {
+				t.Skipf("server echoed %q unchanged, so the drift this guards against is not reachable here", sent)
+			}
+
+			// Whatever the server returned, reconciliation must keep what was
+			// configured, which is what stops the inconsistent-result error.
+			var diags diag.Diagnostics
+			kept := conditionsToModel(types.StringValue(conditions), got.QueryCondition.Conditions, &diags)
+			if diags.HasError() {
+				t.Fatalf("conditionsToModel: %v", diags.Errors())
+			}
+			if keptOp := conditionOperatorOf(t, json.RawMessage(kept.ValueString())); keptOp != sent {
+				t.Errorf("operator: sent %q, server returned %q, reconciliation kept %q, want %q",
+					sent, returned, keptOp, sent)
+			}
+		})
+	}
+}
+
+// conditionOperatorOf pulls the operator out of a single-entry `or` conditions
+// document, so an assertion compares the field itself rather than searching the
+// serialized text. Substring matching would pass "Contains" against
+// "NotContains".
+func conditionOperatorOf(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal conditions %s: %v", raw, err)
+	}
+	arr, ok := doc["or"].([]any)
+	if !ok || len(arr) != 1 {
+		t.Fatalf("conditions.or = %v, want exactly one entry", doc["or"])
+	}
+	entry, ok := arr[0].(map[string]any)
+	if !ok {
+		t.Fatalf("conditions.or[0] = %v, want an object", arr[0])
+	}
+	op, ok := entry["operator"].(string)
+	if !ok {
+		t.Fatalf("conditions.or[0].operator = %v, want a string", entry["operator"])
+	}
+	return op
 }

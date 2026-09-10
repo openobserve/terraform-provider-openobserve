@@ -203,9 +203,33 @@ schedule.** `ZO_SYNTHETICS_MAX_CHECK_BUDGET_SECS` (840s) bounds
 `combos x (attempts x per_attempt + retries x wait_before_retry_secs)`. Running
 a check hourly does not buy it more room than running it every minute.
 
-**Comparison operators on alert conditions are PascalCase.** `Contains`,
-`NotContains`, `IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`. The snake_case
-spellings are rejected. The four `Is*` operators are unary: omit `value`.
+**Operators mean different things in the four places they appear**, and
+conflating them is the easiest way to write an alert that will not apply:
+
+| Where | Word operators? | `value` |
+|---|---|---|
+| `trigger_condition.operator` | **No, symbols only.** A threshold compares a count to a number | n/a, uses `threshold` |
+| `slo_condition.operator` | No, `>` and `>=` only | n/a, uses `critical` |
+| `aggregation.having` | Yes, PascalCase | **Required, and must parse as a number**, whatever the operator |
+| `promql_condition` | Yes, PascalCase | May be omitted; the provider sends `""` |
+| `conditions` (a JSON string) | Yes, **either** spelling | **Required**, even for a unary operator |
+
+The word operators are `Contains`, `NotContains`, `IsNull`, `IsNotNull`,
+`IsEmpty`, `IsNotEmpty`.
+
+`aggregation threshold (having.value) is not numeric` is about the **value**,
+not the operator: `operator = ">="` with `value = "boom"` produces it, and a
+unary operator with a numeric value is accepted. The provider now catches both
+cases during `plan`.
+
+`Failed to parse V1 conditions: data did not match any variant of untagged enum
+ConditionList` means the `conditions` document did not parse, and it names
+nothing. Any of these produce it: a missing `value` or `column`, an unknown
+operator, an unrecognized top-level key, `{}`, or the UI's
+`filterType`/`logicalOperator` group shape, which the API does not accept.
+
+**`pending_period_sec` is a top-level alert attribute**, a sibling of
+`trigger_condition`, not a field inside it.
 
 ## Verifying work
 

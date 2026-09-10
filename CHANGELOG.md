@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-09-10
+
+### Added
+
+- **README coverage for using this provider from Pulumi.** Pulumi bridges it
+  directly with `pulumi package add terraform-provider openobserve/openobserve`,
+  so there is no separate package to publish, but two things differ enough to
+  cost an afternoon: keys inside a JSON string attribute stay snake_case while
+  attribute names are camelCased, and those documents have to be written with
+  their keys in alphabetical order or the resource shows a diff on every `up`.
+  Both are documented, and the example was applied against a live server.
+
+### Fixed
+
+- **An alert or pipeline using a word-shaped operator could not be applied at
+  all.** `conditions` accepts either `Contains` or `contains` on write and
+  always answers snake_case, and the provider stored what came back. Where the
+  configuration said `Contains`, that is an inconsistent result after apply,
+  which Terraform refuses:
+
+  ```
+  Error: Provider produced inconsistent result after apply
+  .query_condition.conditions: was ..."operator":"IsNotEmpty"...
+                               but now ..."operator":"is_not_empty"...
+  ```
+
+  The read path now keeps the configured spelling, for `openobserve_alert` and
+  for an `openobserve_pipeline` condition node, which carries the same
+  document. This affected every release that supported these operators, not
+  only `1.4.0`. On an affected version the workaround is to write the operator
+  in snake_case, which round-trips.
+
+- **`aggregation.having.value` is checked during `plan`.** It has to be present
+  and parse as a number, whatever the operator, because an aggregate is a
+  number. The schema said the opposite for unary operators, and following it
+  earned `HTTP 400: aggregation threshold (having.value) is not numeric`, which
+  names a field the configuration never mentions.
+
+- **`trigger_condition.operator` rejects word-shaped operators during `plan`.**
+  The schema allowed all twelve, but a threshold compares a row count to a
+  number, so the server takes `Contains` and then fails while storing it with
+  `HTTP 500: cannot convert contains into a trigger threshold operator`. A 500
+  gives the user nothing to act on. The other operator attributes are
+  unchanged.
+
+### Notes
+
+The `conditions` document is rewritten by the server in ways beyond operator
+spelling: a bare array becomes `{"and": [...]}`, an unknown key alongside a
+recognized one is dropped, and a document carrying **both** a top-level `or`
+and a top-level `and` is stored with the `and` branch silently discarded.
+
+Only the spelling is repaired. Restructuring changes the predicate rather than
+its presentation, so it is left to surface as a failed apply instead of being
+absorbed. Write one top-level key and nest beneath it. The alerting guide
+covers this.
+
 ## [1.4.0] - 2026-09-03
 
 Synthetic monitoring and ingestion tokens, plus alert changes that came out of
@@ -491,6 +548,7 @@ a stream or dashboard onto the new schema without touching the server.
 - Comprehensive examples for all resources and data sources
 - Apache 2.0 license
 
+[1.4.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.4.1
 [1.4.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.4.0
 [1.3.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.3.1
 [1.3.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.3.0

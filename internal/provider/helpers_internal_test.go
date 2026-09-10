@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -509,4 +510,134 @@ func permissionSet(t *testing.T, diags *diag.Diagnostics, pairs [][2]string) typ
 		t.Fatalf("building permission set: %+v", diags)
 	}
 	return set
+}
+
+// TestApplyAlertToModelKeepsConfiguredOperatorSpelling drives the real read
+// path, not the reconciliation helper on its own.
+//
+// The distinction matters: the bug was a single line in applyAlertToModel that
+// stored the server's document verbatim. A test that calls conditionsToModel
+// directly still passes with that line reverted, so it guards the helper and
+// not the fix.
+//
+// Hermetic on purpose. The integration test needs a live server and is skipped
+// in CI, which would leave this with no coverage at all.
+func TestApplyAlertToModelKeepsConfiguredOperatorSpelling(t *testing.T) {
+	const configured = `{"or":[{"column":"message","operator":"Contains","value":"x","ignore_case":false}]}`
+	// What the server answers with: same predicate, operator lowered.
+	const returned = `{"or":[{"column":"message","operator":"contains","value":"x","ignore_case":false}]}`
+
+	r := &AlertResource{}
+	model := &AlertResourceModel{
+		QueryCondition: &AlertQueryConditionModel{
+			QueryType:  types.StringValue("custom"),
+			Conditions: types.StringValue(configured),
+		},
+	}
+	alert := &AlertAPI{
+		Name: "spelling", StreamType: "logs", StreamName: "logs",
+		QueryCondition: AlertQueryConditionAPI{
+			QueryType:  "custom",
+			Conditions: json.RawMessage(returned),
+		},
+	}
+
+	var diags diag.Diagnostics
+	r.applyAlertToModel(context.Background(), alert, model, &diags)
+	if diags.HasError() {
+		t.Fatalf("applyAlertToModel: %v", diags.Errors())
+	}
+
+	got := model.QueryCondition.Conditions.ValueString()
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(got), &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", got, err)
+	}
+	op := doc["or"].([]any)[0].(map[string]any)["operator"]
+	if op != "Contains" {
+		t.Errorf("operator = %v, want %q (state took the server's spelling, which is an "+
+			"inconsistent result after apply); full document: %s", op, "Contains", got)
+	}
+}
+
+// TestNormalizeConditionOperatorsWalksEveryNestingForm covers the three shapes
+// the server accepts, including `not`, which holds an object rather than an
+// array.
+func TestNormalizeConditionOperatorsWalksEveryNestingForm(t *testing.T) {
+	// Compared as parsed structures, not as text: json.Marshal HTML-escapes
+	// `>` to >, so a `>=` operator never appears literally in the output.
+	for _, tc := range []struct{ name, in, want string }{
+		{"or", `{"or":[{"operator":"Contains"}]}`, `{"or":[{"operator":"contains"}]}`},
+		{"and", `{"and":[{"operator":"NotContains"}]}`, `{"and":[{"operator":"not_contains"}]}`},
+		{"not object", `{"not":{"operator":"IsNull"}}`, `{"not":{"operator":"is_null"}}`},
+		{"nested", `{"or":[{"and":[{"operator":"IsNotEmpty"}]}]}`, `{"or":[{"and":[{"operator":"is_not_empty"}]}]}`},
+		{"snake stays put", `{"or":[{"operator":"contains"}]}`, `{"or":[{"operator":"contains"}]}`},
+		{"symbol untouched", `{"or":[{"operator":">="}]}`, `{"or":[{"operator":">="}]}`},
+		{"unknown untouched", `{"or":[{"operator":"Weird"}]}`, `{"or":[{"operator":"Weird"}]}`},
+		{"non-string operator untouched", `{"or":[{"operator":5}]}`, `{"or":[{"operator":5}]}`},
+		{"other keys untouched", `{"or":[{"column":"Contains"}]}`, `{"or":[{"column":"Contains"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var doc, want any
+			if err := json.Unmarshal([]byte(tc.in), &doc); err != nil {
+				t.Fatalf("unmarshal in: %v", err)
+			}
+			if err := json.Unmarshal([]byte(tc.want), &want); err != nil {
+				t.Fatalf("unmarshal want: %v", err)
+			}
+			got := normalizeConditionOperators(doc)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("normalized %s\n got %#v\nwant %#v", tc.in, got, want)
+			}
+		})
+	}
+}
+
+// TestApplyPipelineToModelKeepsConfiguredOperatorSpelling is the pipeline twin
+// of TestApplyAlertToModelKeepsConfiguredOperatorSpelling.
+//
+// A condition node carries the same document an alert does, and the server
+// rewrites it the same way, so it needs its own coverage: reverting the
+// pipeline call site alone leaves every alert test green.
+func TestApplyPipelineToModelKeepsConfiguredOperatorSpelling(t *testing.T) {
+	const configured = `{"or":[{"column":"level","operator":"Contains","value":"error","ignore_case":false}]}`
+	const returned = `{"or":[{"column":"level","operator":"contains","value":"error","ignore_case":false}]}`
+
+	r := &PipelineResource{}
+	model := &PipelineResourceModel{
+		Nodes: []PipelineNodeModel{{
+			ID:         types.StringValue("cond1"),
+			Type:       types.StringValue("condition"),
+			Conditions: types.StringValue(configured),
+		}},
+	}
+	api := &PipelineAPI{
+		Name: "p", Nodes: []PipelineNodeAPI{{
+			ID:     "cond1",
+			IOType: "default",
+			Data: PipelineNodeDataAPI{
+				NodeType:   "condition",
+				Conditions: json.RawMessage(returned),
+			},
+		}},
+	}
+
+	var diags diag.Diagnostics
+	r.applyToModel(context.Background(), api, model, &diags)
+	if diags.HasError() {
+		t.Fatalf("applyToModel: %v", diags.Errors())
+	}
+
+	if len(model.Nodes) != 1 {
+		t.Fatalf("nodes = %d, want 1", len(model.Nodes))
+	}
+	got := model.Nodes[0].Conditions.ValueString()
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(got), &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", got, err)
+	}
+	if op := doc["or"].([]any)[0].(map[string]any)["operator"]; op != "Contains" {
+		t.Errorf("operator = %v, want %q (node took the server's spelling, which is an "+
+			"inconsistent result after apply); full document: %s", op, "Contains", got)
+	}
 }

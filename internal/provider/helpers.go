@@ -342,6 +342,22 @@ func jsonSubset(want, got any) bool {
 // surface as a permanent diff. Otherwise the server's document wins and
 // Terraform reports the drift.
 func reconcileJSON(configured types.String, serverBody json.RawMessage, diags *diag.Diagnostics) types.String {
+	return reconcileJSONWith(configured, serverBody, nil, diags)
+}
+
+// reconcileJSONWith is reconcileJSON with a normalizer applied to both
+// documents before they are compared.
+//
+// The normalizer exists for fields the server rewrites into an equivalent
+// spelling, where the difference is presentational rather than drift. It
+// affects only the comparison: what gets stored is still the configured
+// document, so the user's spelling survives.
+func reconcileJSONWith(
+	configured types.String,
+	serverBody json.RawMessage,
+	normalize func(any) any,
+	diags *diag.Diagnostics,
+) types.String {
 	serverValue := jsonStringValue(serverBody, diags)
 	if configured.IsNull() || configured.IsUnknown() || configured.ValueString() == "" {
 		return serverValue
@@ -353,6 +369,10 @@ func reconcileJSON(configured types.String, serverBody json.RawMessage, diags *d
 	}
 	if err := json.Unmarshal(serverBody, &got); err != nil {
 		return serverValue
+	}
+	if normalize != nil {
+		want = normalize(want)
+		got = normalize(got)
 	}
 	if jsonSubset(want, got) {
 		normalized, err := normalizeJSON([]byte(configured.ValueString()))

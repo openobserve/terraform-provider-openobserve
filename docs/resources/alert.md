@@ -289,12 +289,12 @@ Optional:
 
 Comparing: `=`, `!=`, `>`, `>=`, `<`, `<=`, `Contains`, `NotContains`.
 
-Testing the column alone: `IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`. These are unary, so they take no `value`. `IsEmpty` also matches a null, which is usually what you want when a field may be either absent or blank.
+`IsNull`, `IsNotNull`, `IsEmpty` and `IsNotEmpty` are accepted but of little use here, because `value` is still required and still has to be a number.
 
 The word-shaped operators are PascalCase because that is the only spelling the API accepts for them.
 - `value` (String) Value to compare against. A value that parses as a number is sent as a JSON number; anything else is sent as a JSON string.
 
-Omit it with a unary operator (`IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`), which tests the column itself.
+Required here, and it must parse as a number: an aggregate is a number, so the server rejects anything else with `400: aggregation threshold (having.value) is not numeric`. This differs from `promql_condition`, where a unary operator may omit it.
 
 
 
@@ -352,6 +352,8 @@ Optional:
 - `frequency_type` (String) Scheduling style: `minutes` (default) or `cron`.
 - `notify_on_warning` (Boolean) Whether a warning-level match sends a notification. Defaults to true; set false to record warnings without paging.
 - `operator` (String) Operator comparing the result to `threshold`. Defaults to `>=`.
+
+Only the symbol operators are accepted here. A threshold compares a row count against a number, so `Contains` and the other word-shaped operators have no meaning; the server answers `HTTP 500: cannot convert contains into a trigger threshold operator`, which is why this is rejected during `plan` instead.
 
 Leave unset on an SLO alert: that family has no count gate, and its comparison lives on `query_condition.slo_condition.operator`.
 - `period` (Number) Lookback window in minutes that each evaluation queries.

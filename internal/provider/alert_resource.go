@@ -29,19 +29,39 @@ var (
 	_ resource.ResourceWithValidateConfig = &AlertResource{}
 )
 
-// comparisonOperators are the operators accepted in alert thresholds and conditions.
+// thresholdOperators are what `trigger_condition.operator` accepts.
 //
-// The word-shaped operators are PascalCase because that is the only spelling
-// the v2 alerts API accepts. Its request model declares them with no serde
-// rename, unlike the internal storage model, which uses snake_case with
-// PascalCase aliases. Sending `is_not_empty` is rejected outright:
+// A threshold compares a row count against a number, so only the symbols mean
+// anything. The schema used to allow the word-shaped operators here too, which
+// the server accepts at the API boundary and then fails on while storing:
+//
+//	HTTP 500: DbError# PutAlert# cannot convert contains into a trigger
+//	threshold operator
+//
+// A 500 gives the user nothing to act on, so the narrower set is enforced
+// during `plan`.
+var thresholdOperators = []string{"=", "!=", ">", ">=", "<", "<="}
+
+// comparisonOperators are what the column comparison attributes accept: an
+// aggregation's `having` and a PromQL condition.
+//
+// The word-shaped forms are PascalCase because that is the only spelling the
+// v2 alerts API accepts for these. Its request model declares the enum with no
+// serde rename, so `is_not_empty` is rejected outright:
 //
 //	unknown variant `is_not_empty`, expected one of `=`, `!=`, `>`, `>=`, `<`,
 //	`<=`, `Contains`, `NotContains`, `IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`
-// The last four are unary: they test a column without comparing it to
-// anything, so a condition using one carries no `value`, which is why `value`
-// is optional. There is no validator pairing the two, because conditions reach
-// the provider as an opaque JSON string rather than as attributes.
+//
+// The two attributes are not interchangeable despite sharing this list.
+// `having.value` must always parse as a number, whatever the operator, so a
+// unary operator is unusable there: the provider sends `""` for an omitted
+// value and the server answers `400: aggregation threshold (having.value) is
+// not numeric`. On a PromQL condition the same omission is accepted.
+//
+// The `conditions` document is governed by none of this. It reaches the server
+// as written and is parsed by the storage model behind the untagged V1
+// `ConditionList`, which accepts either spelling, requires `value` to be
+// present, and rewrites what it stores. See canonicalConditionOperators.
 var comparisonOperators = []string{
 	"=", "!=", ">", ">=", "<", "<=",
 	"Contains", "NotContains",
@@ -172,7 +192,24 @@ func (r *AlertResource) Metadata(_ context.Context, req resource.MetadataRequest
 }
 
 func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
-	conditionAttributes := func(required bool) map[string]schema.Attribute {
+	// numericValue distinguishes `having` from `promql_condition`. They share a
+	// shape but not a contract: an aggregate is a number, so `having.value`
+	// must always parse as one, and a unary operator with no value earns
+	// `400: aggregation threshold (having.value) is not numeric`. A PromQL
+	// condition accepts the omission.
+	conditionAttributes := func(required, numericValue bool) map[string]schema.Attribute {
+		unaryNote := "Testing the column alone: `IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`. These are " +
+			"unary, so they take no `value`. `IsEmpty` also matches a null, which is usually what " +
+			"you want when a field may be either absent or blank.\n\n"
+		valueNote := "Omit it with a unary operator (`IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`), which " +
+			"tests the column itself."
+		if numericValue {
+			unaryNote = "`IsNull`, `IsNotNull`, `IsEmpty` and `IsNotEmpty` are accepted but of little use " +
+				"here, because `value` is still required and still has to be a number.\n\n"
+			valueNote = "Required here, and it must parse as a number: an aggregate is a number, so the " +
+				"server rejects anything else with `400: aggregation threshold (having.value) is not " +
+				"numeric`. This differs from `promql_condition`, where a unary operator may omit it."
+		}
 		return map[string]schema.Attribute{
 			"column": schema.StringAttribute{
 				Required:    required,
@@ -184,9 +221,7 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Optional: !required,
 				Description: "Comparison operator.\n\n" +
 					"Comparing: `=`, `!=`, `>`, `>=`, `<`, `<=`, `Contains`, `NotContains`.\n\n" +
-					"Testing the column alone: `IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`. These are " +
-					"unary, so they take no `value`. `IsEmpty` also matches a null, which is usually what " +
-					"you want when a field may be either absent or blank.\n\n" +
+					unaryNote +
 					"The word-shaped operators are PascalCase because that is the only spelling the API " +
 					"accepts for them.",
 				Validators: []validator.String{stringvalidator.OneOf(comparisonOperators...)},
@@ -198,8 +233,7 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Optional: true,
 				Description: "Value to compare against. A value that parses as a number is sent as a JSON number; " +
 					"anything else is sent as a JSON string.\n\n" +
-					"Omit it with a unary operator (`IsNull`, `IsNotNull`, `IsEmpty`, `IsNotEmpty`), which " +
-					"tests the column itself.",
+					valueNote,
 			},
 			"ignore_case": schema.BoolAttribute{
 				Optional:    true,
@@ -407,7 +441,7 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Blocks: map[string]schema.Block{
 					"promql_condition": schema.SingleNestedBlock{
 						Description: "Comparison applied to the PromQL result. Required when `type` is `promql`.",
-						Attributes:  conditionAttributes(false),
+						Attributes:  conditionAttributes(false, false),
 					},
 					"aggregation": schema.SingleNestedBlock{
 						Description: "Aggregation applied before the threshold comparison. Only used when `type` is `custom`.",
@@ -442,7 +476,7 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 						Blocks: map[string]schema.Block{
 							"having": schema.SingleNestedBlock{
 								Description: "Critical threshold applied to the aggregate value.",
-								Attributes:  conditionAttributes(false),
+								Attributes:  conditionAttributes(false, true),
 							},
 						},
 					},
@@ -542,9 +576,13 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 						Optional: true,
 						Computed: true,
 						Description: "Operator comparing the result to `threshold`. Defaults to `>=`.\n\n" +
+							"Only the symbol operators are accepted here. A threshold compares a row count " +
+							"against a number, so `Contains` and the other word-shaped operators have no " +
+							"meaning; the server answers `HTTP 500: cannot convert contains into a trigger " +
+							"threshold operator`, which is why this is rejected during `plan` instead.\n\n" +
 							"Leave unset on an SLO alert: that family has no count gate, and its comparison " +
 							"lives on `query_condition.slo_condition.operator`.",
-						Validators: []validator.String{stringvalidator.OneOf(comparisonOperators...)},
+						Validators: []validator.String{stringvalidator.OneOf(thresholdOperators...)},
 					},
 					"threshold": schema.Int64Attribute{
 						Optional: true,
@@ -691,6 +729,41 @@ func (r *AlertResource) ValidateConfig(ctx context.Context, req resource.Validat
 			"On an aggregation alert the count threshold is coverage, not severity. Set the warning level "+
 				"with `query_condition.aggregation.warning_value` instead.",
 		)
+	}
+
+	// `having` compares an aggregate, which is a number, so its value has to be
+	// one whatever the operator. Omitting it sends `""` and a non-numeric value
+	// is passed through as a JSON string; either way the server answers
+	//
+	//	400: Invalid aggregation warning value: aggregation threshold
+	//	     (having.value) is not numeric
+	//
+	// which names a field the configuration does not mention. Catching it here
+	// keeps the diagnostic on the attribute the user actually wrote.
+	if agg := config.QueryCondition.Aggregation; agg != nil && agg.Having != nil {
+		havingValue := path.Root("query_condition").AtName("aggregation").AtName("having").AtName("value")
+		switch {
+		case agg.Having.Value.IsUnknown():
+			// Resolved at apply; nothing to check.
+		case agg.Having.Value.IsNull():
+			resp.Diagnostics.AddAttributeError(
+				havingValue,
+				"having requires a numeric value",
+				"An aggregation's `having` compares the aggregate, which is a number, so `value` is "+
+					"required even with a unary operator such as `IsNotEmpty`. Only "+
+					"`query_condition.promql_condition` allows the omission.",
+			)
+		default:
+			if _, err := strconv.ParseFloat(agg.Having.Value.ValueString(), 64); err != nil {
+				resp.Diagnostics.AddAttributeError(
+					havingValue,
+					"having value must be numeric",
+					fmt.Sprintf("`value` is %q, which is not a number. An aggregation's `having` compares "+
+						"the aggregate, so the server rejects anything that does not parse as one.",
+						agg.Having.Value.ValueString()),
+				)
+			}
+		}
 	}
 
 	if sc := config.QueryCondition.SloCondition; sc != nil && sc.Kind.ValueString() == "burn_rate" {
@@ -1093,6 +1166,75 @@ func decodeConditionValue(raw json.RawMessage) types.String {
 	return types.StringValue(strings.TrimSpace(string(raw)))
 }
 
+// canonicalConditionOperators maps every accepted spelling of a word-shaped
+// operator onto one form, for comparison only.
+//
+// The API request model declares the operator enum with no serde rename, so a
+// write must use PascalCase for the typed conditions. The storage model behind
+// the untagged V1 `ConditionList` uses snake_case, and the `conditions`
+// document is parsed and re-serialized through it. Both spellings are accepted
+// on write there, but everything comes back snake_case.
+var canonicalConditionOperators = map[string]string{
+	"Contains": "contains", "contains": "contains",
+	"NotContains": "not_contains", "not_contains": "not_contains",
+	"IsNull": "is_null", "is_null": "is_null",
+	"IsNotNull": "is_not_null", "is_not_null": "is_not_null",
+	"IsEmpty": "is_empty", "is_empty": "is_empty",
+	"IsNotEmpty": "is_not_empty", "is_not_empty": "is_not_empty",
+}
+
+// normalizeConditionOperators rewrites every `operator` in a conditions
+// document to one spelling, so a comparison does not mistake the server's
+// casing for drift.
+//
+// It recurses because conditions nest, and not uniformly: `or` and `and` hold
+// arrays whose entries may themselves be `or`/`and` objects, while `not` holds
+// a single object. Walking maps and slices generically covers all three
+// without encoding the grammar.
+func normalizeConditionOperators(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			if k == "operator" {
+				if s, ok := val.(string); ok {
+					if canonical, known := canonicalConditionOperators[s]; known {
+						out[k] = canonical
+						continue
+					}
+				}
+			}
+			out[k] = normalizeConditionOperators(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i := range t {
+			out[i] = normalizeConditionOperators(t[i])
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// conditionsToModel renders a conditions document back, keeping the configured
+// spelling of any operator the server rewrote. It serves both alerts and a
+// pipeline's condition nodes, which carry the same document.
+//
+// Writing the server's spelling into state where the configuration said
+// something else is an inconsistent result after apply, which fails the apply
+// outright, and reports drift on every plan after that.
+//
+// Spelling is all this repairs. The server also restructures: a bare array
+// becomes `{"and": [...]}`, unknown keys are dropped, and a document with both
+// a top-level `or` and a top-level `and` silently loses the `and`. Those are
+// not presentational, so they are deliberately left to surface as a mismatch
+// rather than be papered over.
+func conditionsToModel(prior types.String, raw json.RawMessage, diags *diag.Diagnostics) types.String {
+	return reconcileJSONWith(prior, raw, normalizeConditionOperators, diags)
+}
+
 // conditionValueToModel renders a threshold back, keeping the configured value
 // null when the server reports an empty one.
 //
@@ -1234,6 +1376,10 @@ func queryConditionToModel(ctx context.Context, api *AlertQueryConditionAPI, pri
 		priorHavingIgnoreCase = prior.Aggregation.Having.IgnoreCase
 		priorHavingValue = prior.Aggregation.Having.Value
 	}
+	var priorConditions types.String
+	if prior != nil {
+		priorConditions = prior.Conditions
+	}
 
 	out := &AlertQueryConditionModel{
 		QueryType:          types.StringValue(api.QueryType),
@@ -1241,7 +1387,7 @@ func queryConditionToModel(ctx context.Context, api *AlertQueryConditionAPI, pri
 		PromQL:             stringFromPtr(api.PromQL),
 		PromQLWarningValue: float64FromPtr(api.PromQLWarningValue),
 		PromQLMultiAlert:   boolPreserveNull(priorPromQLMultiAlert, api.PromQLMultiAlert),
-		Conditions:         jsonStringValue(api.Conditions, diags),
+		Conditions:         conditionsToModel(priorConditions, api.Conditions, diags),
 		VRLFunction:        stringFromPtr(api.VRLFunction),
 		SearchEventType:    stringFromPtr(api.SearchEventType),
 	}

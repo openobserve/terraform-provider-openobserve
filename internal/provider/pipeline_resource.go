@@ -635,7 +635,10 @@ func (r *PipelineResource) applyToModel(ctx context.Context, api *PipelineAPI, m
 			node.AfterFlatten = boolFromPtr(n.Data.AfterFlatten)
 		case "condition":
 			if len(n.Data.Conditions) > 0 {
-				node.Conditions = reconcileJSON(priorConditions[n.ID], n.Data.Conditions, diags)
+				// A condition node carries the same document an alert does, and
+				// the server rewrites operator spelling here too, so it needs
+				// the same reconciliation.
+				node.Conditions = conditionsToModel(priorConditions[n.ID], n.Data.Conditions, diags)
 			}
 		}
 		nodes = append(nodes, node)

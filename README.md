@@ -4,7 +4,9 @@
 [![Registry](https://img.shields.io/badge/Terraform_Registry-openobserve%2Fopenobserve-623CE4?logo=terraform)](https://registry.terraform.io/providers/openobserve/openobserve/latest)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Manage [OpenObserve](https://openobserve.ai) with Terraform: organizations, streams, dashboards, alerting, service level objectives, and IAM.
+Manage [OpenObserve](https://openobserve.ai) with Terraform, OpenTofu, or
+Pulumi: organizations, streams, dashboards, alerting, service level objectives,
+synthetic monitoring, pipelines, and IAM.
 
 ## Requirements
 
@@ -21,7 +23,7 @@ terraform {
   required_providers {
     openobserve = {
       source  = "openobserve/openobserve"
-      version = "~> 1.3"
+      version = "~> 1.4"
     }
   }
 }
@@ -80,6 +82,92 @@ export OPENOBSERVE_USERNAME="admin@example.com"
 export OPENOBSERVE_PASSWORD="your-password"
 export OPENOBSERVE_ORG_ID="default"
 ```
+
+## Using this provider from Pulumi
+
+There is no separate `pulumi-openobserve` package. Pulumi bridges this provider
+directly, so you get every resource and data source listed below without
+anything extra to install:
+
+```bash
+pulumi package add terraform-provider openobserve/openobserve
+```
+
+That pulls the published provider from the Terraform Registry, generates an SDK
+for your project's language, and installs it. Verified with Pulumi 3.261. In
+TypeScript:
+
+```ts
+import * as openobserve from "@pulumi/openobserve";
+
+const provider = new openobserve.Provider("oo", {
+  endpoint: "https://openobserve.example.com",
+  username: "admin@example.com",
+  password: process.env.OO_PASSWORD,
+  orgId: "default",
+});
+
+const folder = new openobserve.Folder("alerts", {
+  name: "Reliability",
+  folderType: "alerts",
+}, { provider });
+
+const stream = new openobserve.Stream("appLogs", {
+  name: "app_logs",
+  streamType: "logs",
+  dataRetention: 30,
+  fullTextSearchKeys: ["message"],
+}, { provider });
+
+const locations = openobserve.getSyntheticLocationsOutput({}, { provider });
+```
+
+### What changes when you cross the bridge
+
+| Terraform | Pulumi |
+|---|---|
+| `folder_type`, `org_id` | `folderType`, `orgId` (attributes are camelCased) |
+| repeated blocks: `cookie`, `variable` | pluralized arrays: `cookies`, `variables` |
+| single blocks: `auth`, `query_condition` | stay singular: `auth`, `queryCondition` |
+| `data "openobserve_alerts"` | `getAlerts()` / `getAlertsOutput()` |
+
+Sensitive attributes stay sensitive, and provider warnings come through intact,
+including the one explaining that removing an `openobserve_ingestion_token`
+disables it rather than deleting it.
+
+### Two things that will bite you
+
+**JSON string attributes keep their server-side spelling.** Attribute *names*
+are camelCased, but attributes that carry a JSON document (`conditions` on an
+alert, `config` on a synthetic, a dashboard's JSON) are opaque strings passed
+straight to the API. The keys inside them are **not** camelCased:
+
+```ts
+// right: keys inside the JSON stay snake_case
+conditions: JSON.stringify({
+  or: [{ column: "level", operator: "Contains", value: "error", ignore_case: false }],
+}),
+```
+
+Writing `ignoreCase` there produces an HTTP 422 that names neither the field nor
+the cause.
+
+**Write JSON keys in alphabetical order.** The provider stores these documents
+key-sorted. HCL's `jsonencode` also sorts, so Terraform matches; JavaScript's
+`JSON.stringify` preserves insertion order, so it does not, and the resource
+shows a diff on every `pulumi up` forever:
+
+```ts
+// churns on every up
+config: JSON.stringify({ method: "GET", expect_status: 200, timeout_ms: 10000 }),
+
+// stable
+config: JSON.stringify({ expect_status: 200, method: "GET", timeout_ms: 10000 }),
+```
+
+Also worth knowing: the generated SDK types every input as optional, including
+attributes this provider marks required, so a missing `name` surfaces at `pulumi
+up` rather than at compile time.
 
 ## Resources
 
