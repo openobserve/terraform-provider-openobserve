@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -553,17 +554,147 @@ func samePartitionType(a, b any) bool {
 // State mapping
 // ---------------------------------------------------------------------------
 
+// Bounds on how long readInto waits for a settings write to become visible.
+// Package variables so tests can shorten them.
+var (
+	streamReadBackTimeout  = 15 * time.Second
+	streamReadBackInterval = 250 * time.Millisecond
+)
+
+// readInto reads the stream back after a write and stores it in model.
+//
+// OpenObserve can answer that read with the settings from before the write:
+// until openobserve/openobserve#14982 is fixed even the node that took the
+// write serves them from a cache that refreshes in the background, and in a
+// cluster other nodes may until they catch up. The read is therefore retried, with backoff,
+// until every planned value shows up or streamReadBackTimeout passes. A value
+// that never shows up is still stored, so Terraform reports it as before.
+// Once one read has succeeded, a failed retry stops the retries and keeps
+// that read, with a warning, instead of failing the apply.
 func (r *StreamResource) readInto(ctx context.Context, org, streamType, name string, model *StreamResourceModel, diags *diag.Diagnostics) {
-	stream, err := r.client.GetStream(ctx, org, streamType, name)
-	if err != nil {
-		diags.AddError("Error reading stream after write", err.Error())
-		return
+	planned := *model
+	deadline := time.Now().Add(streamReadBackTimeout)
+	interval := streamReadBackInterval
+	var last *StreamResourceModel
+	for {
+		stream, err := r.client.GetStream(ctx, org, streamType, name)
+		if (err != nil || stream == nil) && last != nil {
+			reason := "the stream was not found"
+			if err != nil {
+				reason = err.Error()
+			}
+			diags.AddWarning("Stream settings may not reflect the latest write",
+				fmt.Sprintf("Re-reading stream %q after the write failed (%s), so its state comes from an earlier read that did not yet show every planned setting.", name, reason))
+			*model = *last
+			return
+		}
+		if err != nil {
+			diags.AddError("Error reading stream after write", err.Error())
+			return
+		}
+		if stream == nil {
+			diags.AddError("Stream not found after write", fmt.Sprintf("Stream %q of type %q was not found in org %q after being written.", name, streamType, org))
+			return
+		}
+
+		got := planned
+		var readDiags diag.Diagnostics
+		r.applyStreamToModel(ctx, stream, &got, &readDiags)
+		if readDiags.HasError() || streamSettingsMatchPlan(planned, got) || !time.Now().Add(interval).Before(deadline) {
+			diags.Append(readDiags...)
+			*model = got
+			return
+		}
+		last = &got
+
+		select {
+		case <-ctx.Done():
+			diags.AddError("Error reading stream after write", ctx.Err().Error())
+			return
+		case <-time.After(interval):
+		}
+		interval = min(interval*2, 2*time.Second)
 	}
-	if stream == nil {
-		diags.AddError("Stream not found after write", fmt.Sprintf("Stream %q of type %q was not found in org %q after being written.", name, streamType, org))
-		return
+}
+
+// streamSettingsMatchPlan reports whether every settings value known at plan
+// time came back unchanged, which Terraform requires of the applied state.
+// The other attributes are left out: id and org_id are set before the read,
+// name and stream_type force replacement, and effective_name and schema are
+// unknown in the plan.
+func streamSettingsMatchPlan(planned, got StreamResourceModel) bool {
+	pairs := [][2]attr.Value{
+		{planned.DataRetention, got.DataRetention},
+		{planned.MaxQueryRange, got.MaxQueryRange},
+		{planned.FlattenLevel, got.FlattenLevel},
+		{planned.StoreOriginalData, got.StoreOriginalData},
+		{planned.ApproxPartition, got.ApproxPartition},
+		{planned.IndexOriginalData, got.IndexOriginalData},
+		{planned.IndexAllValues, got.IndexAllValues},
+		{planned.EnableDistinctFields, got.EnableDistinctFields},
+		{planned.EnableLogPatternsExtraction, got.EnableLogPatternsExtraction},
+		{planned.FullTextSearchKeys, got.FullTextSearchKeys},
+		{planned.IndexFields, got.IndexFields},
+		{planned.BloomFilterFields, got.BloomFilterFields},
+		{planned.DefinedSchemaFields, got.DefinedSchemaFields},
+		{planned.DistinctValueFields, got.DistinctValueFields},
+		{planned.PartitionKeys, got.PartitionKeys},
+		{planned.StorageType, got.StorageType},
 	}
-	r.applyStreamToModel(ctx, stream, model, diags)
+	for _, p := range pairs {
+		if !knownValuesMatch(p[0], p[1]) {
+			return false
+		}
+	}
+	return true
+}
+
+// knownValuesMatch reports whether got equals planned wherever planned is
+// known, at any depth: an unknown value, including an unknown attribute of a
+// list element such as an unset partition key type, matches anything.
+func knownValuesMatch(planned, got attr.Value) bool {
+	if planned.IsUnknown() {
+		return true
+	}
+	switch p := planned.(type) {
+	case types.List:
+		g, ok := got.(types.List)
+		if !ok || p.IsNull() || g.IsNull() || g.IsUnknown() {
+			return planned.Equal(got)
+		}
+		pe, ge := p.Elements(), g.Elements()
+		if len(pe) != len(ge) {
+			return false
+		}
+		for i := range pe {
+			if !knownValuesMatch(pe[i], ge[i]) {
+				return false
+			}
+		}
+		return true
+	case types.Object:
+		g, ok := got.(types.Object)
+		if !ok || p.IsNull() || g.IsNull() || g.IsUnknown() {
+			return planned.Equal(got)
+		}
+		ga := g.Attributes()
+		for name, pv := range p.Attributes() {
+			gv, ok := ga[name]
+			if !ok || !knownValuesMatch(pv, gv) {
+				return false
+			}
+		}
+		return true
+	case types.Set:
+		// Set elements have no position to pair up by, so a set with an
+		// unknown element is treated like an unknown set and matches anything.
+		for _, e := range p.Elements() {
+			if e.IsUnknown() {
+				return true
+			}
+		}
+	}
+	return planned.Equal(got)
 }
 
 func (r *StreamResource) applyStreamToModel(ctx context.Context, stream *StreamAPI, model *StreamResourceModel, diags *diag.Diagnostics) {
