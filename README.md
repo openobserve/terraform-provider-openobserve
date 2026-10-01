@@ -122,7 +122,7 @@ const locations = openobserve.getSyntheticLocationsOutput({}, { provider });
 ```
 
 Append a version to pin one, for example
-`pulumi package add terraform-provider openobserve/openobserve 1.4.1`.
+`pulumi package add terraform-provider openobserve/openobserve 1.4.2`.
 
 > **Pulumi resolves through the OpenTofu registry, not the Terraform Registry.**
 > That mirror follows GitHub releases on its own schedule, so a version
