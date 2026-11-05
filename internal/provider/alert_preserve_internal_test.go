@@ -261,6 +261,141 @@ func TestAlertUpdateKeepsUnmanagedSettings(t *testing.T) {
 	}
 }
 
+// Optional+Computed attributes left unset keep the server's value: the
+// destinations list (one added in the UI must not be removed), the trigger's
+// operator and threshold, and the aggregation's group_by. The update sends the
+// server's value; state holds the planned one, which differs only when the
+// server changed after the plan.
+func TestAlertUpdateKeepsUnsetComputedAttributes(t *testing.T) {
+	t.Parallel()
+	setOf := func(v ...string) types.Set {
+		values := make([]attr.Value, 0, len(v))
+		for _, s := range v {
+			values = append(values, types.StringValue(s))
+		}
+		return types.SetValueMust(types.StringType, values)
+	}
+	listOf := func(v ...string) types.List {
+		values := make([]attr.Value, 0, len(v))
+		for _, s := range v {
+			values = append(values, types.StringValue(s))
+		}
+		return types.ListValueMust(types.StringType, values)
+	}
+	cases := map[string]struct {
+		planned  types.Set
+		operator string
+		groupBy  types.List
+	}{
+		// The refresh before the plan read the UI's changes into state.
+		"refreshed state": {setOf("d1", "ui_added"), ">", listOf("host")},
+		// The UI changed them after the plan was made.
+		"changed after the plan": {setOf("d1"), ">=", listOf("service")},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			fake, srv := newReplacingServer(t)
+			stored := storedAlert(false)
+			stored["destinations"] = []string{"d1", "ui_added"}
+			stored["query_condition"] = map[string]any{
+				"type": "custom",
+				"aggregation": map[string]any{
+					"group_by": []string{"host"},
+					"function": "count",
+					"having":   map[string]any{"column": "total", "operator": ">", "value": 10},
+				},
+			}
+			trigger, _ := stored["trigger_condition"].(map[string]any)
+			trigger["operator"] = ">"
+			trigger["threshold"] = 5
+			fake.put(testAlertPath, stored)
+			r := &AlertResource{client: newClient(srv.URL, "u", "p", "default")}
+
+			model := func(description string, dests types.Set, operator types.String, threshold types.Int64, groupBy types.List) AlertResourceModel {
+				m := alertModel(description, types.BoolValue(false))
+				m.Destinations = dests
+				m.QueryCondition.QueryType = types.StringValue("custom")
+				m.QueryCondition.SQL = types.StringNull()
+				m.QueryCondition.Aggregation = &AlertAggregationModel{
+					GroupBy:  groupBy,
+					Function: types.StringValue("count"),
+					Having: &AlertConditionModel{
+						Column:   types.StringValue("total"),
+						Operator: types.StringValue(">"),
+						Value:    types.StringValue("10"),
+					},
+				}
+				m.TriggerCondition.Operator = operator
+				m.TriggerCondition.Threshold = threshold
+				return m
+			}
+			plan := model("after", tc.planned, types.StringValue(tc.operator), types.Int64Value(5), tc.groupBy)
+			req, resp := updateRequest(t, r,
+				plan,
+				model("before", tc.planned, types.StringValue(tc.operator), types.Int64Value(5), tc.groupBy),
+				model("after", types.SetNull(types.StringType), types.StringNull(), types.Int64Null(), types.ListNull(types.StringType)),
+			)
+			r.Update(context.Background(), req, resp)
+			if resp.Diagnostics.HasError() {
+				t.Fatalf("update: %+v", resp.Diagnostics)
+			}
+
+			dests, _ := fake.lastPut["destinations"].([]any)
+			if len(dests) != 2 {
+				t.Errorf("PUT destinations: got %v, want the server's [d1 ui_added]", fake.lastPut["destinations"])
+			}
+			tc2, _ := fake.lastPut["trigger_condition"].(map[string]any)
+			if tc2["operator"] != ">" || tc2["threshold"] != float64(5) {
+				t.Errorf("PUT trigger: got operator %v threshold %v, want the server's > 5", tc2["operator"], tc2["threshold"])
+			}
+			qc, _ := fake.lastPut["query_condition"].(map[string]any)
+			agg, _ := qc["aggregation"].(map[string]any)
+			if gb, _ := agg["group_by"].([]any); len(gb) != 1 || gb[0] != "host" {
+				t.Errorf("PUT group_by: got %v, want the server's [host]", agg["group_by"])
+			}
+
+			var got AlertResourceModel
+			resp.State.Get(context.Background(), &got)
+			if !got.Destinations.Equal(tc.planned) {
+				t.Errorf("state destinations: got %v, want the planned %v", got.Destinations, tc.planned)
+			}
+			if got.TriggerCondition.Operator.ValueString() != tc.operator {
+				t.Errorf("state operator: got %v, want the planned %q", got.TriggerCondition.Operator, tc.operator)
+			}
+			if !got.QueryCondition.Aggregation.GroupBy.Equal(tc.groupBy) {
+				t.Errorf("state group_by: got %v, want the planned %v", got.QueryCondition.Aggregation.GroupBy, tc.groupBy)
+			}
+		})
+	}
+}
+
+// A change of alert family moves the trigger to the new family's defaults
+// rather than carrying the old family's operator and threshold over, which an
+// SLO alert would refuse.
+func TestKeepServerComputedFamilyChange(t *testing.T) {
+	t.Parallel()
+	config := alertModel("x", types.BoolNull())
+	config.TriggerCondition.Operator = types.StringNull()
+	config.TriggerCondition.Threshold = types.Int64Null()
+	current := &AlertAPI{
+		QueryCondition:   AlertQueryConditionAPI{QueryType: "sql"},
+		TriggerCondition: AlertTriggerConditionAPI{Operator: ">", Threshold: 5},
+	}
+
+	body := &AlertAPI{QueryCondition: AlertQueryConditionAPI{QueryType: "slo"}}
+	keepServerComputed(&config, current, body)
+	if body.TriggerCondition.Operator != "=" || body.TriggerCondition.Threshold != 0 {
+		t.Errorf("sql to slo: got %q %d, want the SLO defaults = 0", body.TriggerCondition.Operator, body.TriggerCondition.Threshold)
+	}
+
+	body = &AlertAPI{QueryCondition: AlertQueryConditionAPI{QueryType: "custom"}}
+	keepServerComputed(&config, current, body)
+	if body.TriggerCondition.Operator != ">" || body.TriggerCondition.Threshold != 5 {
+		t.Errorf("sql to custom: got %q %d, want the server's > 5", body.TriggerCondition.Operator, body.TriggerCondition.Threshold)
+	}
+}
+
 // promql_rule_mode is kept while the alert stays a PromQL alert.
 func TestAlertUpdateKeepsPromQLRuleMode(t *testing.T) {
 	t.Parallel()
@@ -676,7 +811,6 @@ func TestAlertDestinationUpdateKeepsUnmanagedFields(t *testing.T) {
 			stored := storedDestination(map[string]any{"prebuilt_type": "pagerduty"})
 			stored["destination_type_name"] = "pagerduty"
 			stored["output_format"] = "nestedevent"
-			stored["action_id"] = "act-1"
 			fake.put(testDestinationPath, stored)
 			r := &AlertDestinationResource{client: newClient(srv.URL, "u", "p", "default")}
 
@@ -696,7 +830,6 @@ func TestAlertDestinationUpdateKeepsUnmanagedFields(t *testing.T) {
 			for k, v := range map[string]string{
 				"destination_type_name": "pagerduty",
 				"output_format":         "nestedevent",
-				"action_id":             "act-1",
 			} {
 				if fake.lastPut[k] != v {
 					t.Errorf("PUT %s: got %v, want %q", k, fake.lastPut[k], v)

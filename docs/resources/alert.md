@@ -211,6 +211,8 @@ resource "openobserve_alert" "burning_fast" {
 - `deduplication` (Block, Optional) Collapse repeated firings of the same underlying issue into one notification. (see [below for nested schema](#nestedblock--deduplication))
 - `description` (String) What the alert monitors.
 - `destinations` (Set of String) Names of the `openobserve_alert_destination` resources notified when the alert fires.
+
+Leave it unset to keep whatever the server holds across updates, so destinations added in the UI or through the API are not removed by an unrelated change. Set it to manage the list, and a change made elsewhere then shows as drift.
 - `enabled` (Boolean) Whether the alert is evaluated. Disabled alerts stay configured but never fire.
 - `folder_id` (String) Alert folder that holds this alert. Use `openobserve_folder` with `folder_type = "alerts"` to create one.
 - `is_real_time` (Boolean) Evaluate as data arrives instead of on a schedule.
@@ -290,6 +292,8 @@ Optional:
 - `group_by` (List of String) Columns to group by before aggregating.
 
 On a `sql` multi-alert this can be left empty and the server fills it in from the query's own GROUP BY, so the value read back may differ from the empty list that was sent.
+
+Left unset on an existing alert, the server's list is kept across updates.
 - `having` (Block, Optional) Critical threshold applied to the aggregate value. (see [below for nested schema](#nestedblock--query_condition--aggregation--having))
 - `multi_alert` (Boolean) Evaluate and notify per group instead of collapsing to a single result.
 
@@ -369,14 +373,14 @@ Optional:
 - `frequency` (Number) How often the alert runs, in minutes. Used when `frequency_type` is `minutes`.
 - `frequency_type` (String) Scheduling style: `minutes` (default) or `cron`.
 - `notify_on_warning` (Boolean) Whether a warning-level match sends a notification. Defaults to true; set false to record warnings without paging.
-- `operator` (String) Operator comparing the result to `threshold`. Defaults to `>=`.
+- `operator` (String) Operator comparing the result to `threshold`. Defaults to `>=` on a new alert; left unset on an existing one, the server's operator is kept across updates.
 
 Only the symbol operators are accepted here. A threshold compares a row count against a number, so `Contains` and the other word-shaped operators have no meaning; the server answers `HTTP 500: cannot convert contains into a trigger threshold operator`, which is why this is rejected during `plan` instead.
 
 Leave unset on an SLO alert: that family has no count gate, and its comparison lives on `query_condition.slo_condition.operator`.
 - `period` (Number) Lookback window in minutes that each evaluation queries.
 - `silence` (Number) Minutes to stay quiet after firing before the alert may fire again.
-- `threshold` (Number) Critical threshold the result is compared against. Defaults to `1`.
+- `threshold` (Number) Critical threshold the result is compared against. Defaults to `1` on a new alert; left unset on an existing one, the server's threshold is kept across updates.
 
 Leave unset on an SLO alert: that family has no count gate, and its threshold lives on `query_condition.slo_condition.critical`.
 - `timezone` (String) Timezone for the cron schedule, for example `America/New_York`.

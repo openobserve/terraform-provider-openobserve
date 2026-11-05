@@ -63,8 +63,8 @@ func (r *AlertDestinationResource) Schema(_ context.Context, _ resource.SchemaRe
 			"A destination is a webhook (`http`), a set of email recipients (`email`), or an AWS SNS topic (`sns`).\n\n" +
 			"OpenObserve replaces the whole destination on update. Settings this resource does not manage yet are " +
 			"read from the server before each update and sent back unchanged, so a prebuilt destination created " +
-			"in the UI (PagerDuty, Jira, Splunk and the like) keeps its kind: `output_format`, " +
-			"`destination_type_name` and `action_id`. `metadata` is kept the same way while it is unset.",
+			"in the UI (PagerDuty, Jira, Splunk and the like) keeps its kind: `output_format` and " +
+			"`destination_type_name`. `metadata` is kept the same way while it is unset.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -338,8 +338,8 @@ func (r *AlertDestinationResource) Update(ctx context.Context, req resource.Upda
 // configuration does not decide.
 //
 // The update endpoint replaces the whole destination, so any field the body
-// leaves out is cleared. output_format, destination_type_name and action_id
-// have no attribute, and metadata may be unset; those are read just before the
+// leaves out is cleared. output_format and destination_type_name have no
+// attribute, and metadata may be unset; those are read just before the
 // write and sent back. State is not used for this: it may be stale or, for
 // state written by a release that did not know the attribute, empty. Losing
 // destination_type_name would leave a prebuilt destination half converted,
@@ -357,7 +357,6 @@ func (r *AlertDestinationResource) keepUnmanagedFields(ctx context.Context, org,
 	}
 	body.OutputFormat = current.OutputFormat
 	body.DestinationTypeName = current.DestinationTypeName
-	body.ActionID = current.ActionID
 	if configuredMetadata.IsNull() {
 		body.Metadata = current.Metadata
 	}

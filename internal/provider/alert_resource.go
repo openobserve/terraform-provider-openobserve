@@ -16,7 +16,10 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
@@ -317,7 +320,13 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Optional:    true,
 				Computed:    true,
 				ElementType: types.StringType,
-				Description: "Names of the `openobserve_alert_destination` resources notified when the alert fires.",
+				// Unset, the plan carries the list last read and the update sends
+				// the server's; see keepUnmanagedSettings.
+				PlanModifiers: []planmodifier.Set{setplanmodifier.UseStateForUnknown()},
+				Description: "Names of the `openobserve_alert_destination` resources notified when the alert fires.\n\n" +
+					"Leave it unset to keep whatever the server holds across updates, so destinations added in " +
+					"the UI or through the API are not removed by an unrelated change. Set it to manage the " +
+					"list, and a change made elsewhere then shows as drift.",
 			},
 			"template": schema.StringAttribute{
 				Optional: true,
@@ -488,13 +497,15 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 						Description: "Aggregation applied before the threshold comparison. Only used when `type` is `custom`.",
 						Attributes: map[string]schema.Attribute{
 							"group_by": schema.ListAttribute{
-								Optional:    true,
-								Computed:    true,
-								ElementType: types.StringType,
+								Optional:      true,
+								Computed:      true,
+								ElementType:   types.StringType,
+								PlanModifiers: []planmodifier.List{listplanmodifier.UseStateForUnknown()},
 								Description: "Columns to group by before aggregating.\n\n" +
 									"On a `sql` multi-alert this can be left empty and the server fills it in " +
 									"from the query's own GROUP BY, so the value read back may differ from " +
-									"the empty list that was sent.",
+									"the empty list that was sent.\n\n" +
+									"Left unset on an existing alert, the server's list is kept across updates.",
 							},
 							"function": schema.StringAttribute{
 								Optional:    true,
@@ -614,9 +625,11 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 						Description: "Lookback window in minutes that each evaluation queries.",
 					},
 					"operator": schema.StringAttribute{
-						Optional: true,
-						Computed: true,
-						Description: "Operator comparing the result to `threshold`. Defaults to `>=`.\n\n" +
+						Optional:      true,
+						Computed:      true,
+						PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+						Description: "Operator comparing the result to `threshold`. Defaults to `>=` on a new alert; left " +
+							"unset on an existing one, the server's operator is kept across updates.\n\n" +
 							"Only the symbol operators are accepted here. A threshold compares a row count " +
 							"against a number, so `Contains` and the other word-shaped operators have no " +
 							"meaning; the server answers `HTTP 500: cannot convert contains into a trigger " +
@@ -626,9 +639,11 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 						Validators: []validator.String{stringvalidator.OneOf(thresholdOperators...)},
 					},
 					"threshold": schema.Int64Attribute{
-						Optional: true,
-						Computed: true,
-						Description: "Critical threshold the result is compared against. Defaults to `1`.\n\n" +
+						Optional:      true,
+						Computed:      true,
+						PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
+						Description: "Critical threshold the result is compared against. Defaults to `1` on a new alert; " +
+							"left unset on an existing one, the server's threshold is kept across updates.\n\n" +
 							"Leave unset on an SLO alert: that family has no count gate, and its threshold " +
 							"lives on `query_condition.slo_condition.critical`.",
 					},
@@ -962,12 +977,12 @@ func (r *AlertResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	}
 	body.ID = alertID
 
-	var configuredRecovery types.Bool
-	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("notify_on_recovery"), &configuredRecovery)...)
+	var config AlertResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	r.keepUnmanagedSettings(ctx, org, alertID, configuredRecovery, &body, &resp.Diagnostics)
+	r.keepUnmanagedSettings(ctx, org, alertID, &config, &body, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -990,20 +1005,70 @@ func (r *AlertResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	plan.AlertID = types.StringValue(alertID)
 	plan.ID = types.StringValue(alertResourceID(org, alertID))
 
-	// Unset in the configuration, the plan carries the value last read. The
-	// write above sent the server's current value, which differs only when it
-	// changed after the plan was made. State keeps the planned value then, as
-	// Terraform requires, and the next refresh reads the server's without a
-	// diff, because the attribute is computed and unset.
-	planned := plan.NotifyOnRecovery
+	planned := plannedUnsetValuesOf(&plan)
 	r.refresh(ctx, org, alertID, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if configuredRecovery.IsNull() && !planned.IsUnknown() {
-		plan.NotifyOnRecovery = planned
-	}
+	planned.restore(&config, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// plannedUnsetValues holds the planned values of the Optional+Computed
+// attributes an update keeps from the server when they are unset.
+//
+// Unset in the configuration, the plan carries the value last read, and the
+// write sends the server's current value, which differs only when it changed
+// after the plan was made. State keeps the planned value then, as Terraform
+// requires of a known planned value, and the next refresh reads the server's
+// without a diff, because the attribute is computed and unset.
+type plannedUnsetValues struct {
+	notifyOnRecovery types.Bool
+	destinations     types.Set
+	operator         types.String
+	threshold        types.Int64
+	groupBy          *types.List
+}
+
+func plannedUnsetValuesOf(plan *AlertResourceModel) plannedUnsetValues {
+	p := plannedUnsetValues{
+		notifyOnRecovery: plan.NotifyOnRecovery,
+		destinations:     plan.Destinations,
+		operator:         types.StringUnknown(),
+		threshold:        types.Int64Unknown(),
+	}
+	if plan.TriggerCondition != nil {
+		p.operator = plan.TriggerCondition.Operator
+		p.threshold = plan.TriggerCondition.Threshold
+	}
+	if plan.QueryCondition != nil && plan.QueryCondition.Aggregation != nil {
+		groupBy := plan.QueryCondition.Aggregation.GroupBy
+		p.groupBy = &groupBy
+	}
+	return p
+}
+
+func (p plannedUnsetValues) restore(config, model *AlertResourceModel) {
+	if config.NotifyOnRecovery.IsNull() && !p.notifyOnRecovery.IsUnknown() {
+		model.NotifyOnRecovery = p.notifyOnRecovery
+	}
+	if config.Destinations.IsNull() && !p.destinations.IsUnknown() {
+		model.Destinations = p.destinations
+	}
+	if config.TriggerCondition != nil && model.TriggerCondition != nil {
+		if config.TriggerCondition.Operator.IsNull() && !p.operator.IsUnknown() {
+			model.TriggerCondition.Operator = p.operator
+		}
+		if config.TriggerCondition.Threshold.IsNull() && !p.threshold.IsUnknown() {
+			model.TriggerCondition.Threshold = p.threshold
+		}
+	}
+	if p.groupBy != nil && !p.groupBy.IsUnknown() &&
+		config.QueryCondition != nil && config.QueryCondition.Aggregation != nil &&
+		config.QueryCondition.Aggregation.GroupBy.IsNull() &&
+		model.QueryCondition != nil && model.QueryCondition.Aggregation != nil {
+		model.QueryCondition.Aggregation.GroupBy = *p.groupBy
+	}
 }
 
 // keepUnmanagedSettings fills in what an update sends for the settings the
@@ -1014,7 +1079,8 @@ func (r *AlertResource) Update(ctx context.Context, req resource.UpdateRequest, 
 // one, and the settings that have no attribute (recovery_destinations,
 // keep_firing_for, suppress_repeats, runbook_url, oncall_team,
 // incident_title_template, promql_rule_mode), are read from the server just
-// before the write. State is not used for this: it may be stale (a plan made
+// before the write, and so are the Optional+Computed attributes left unset
+// (see keepServerComputed). State is not used for this: it may be stale (a plan made
 // with -refresh=false) or written by a release that did not know the
 // attribute.
 //
@@ -1023,7 +1089,7 @@ func (r *AlertResource) Update(ctx context.Context, req resource.UpdateRequest, 
 // the configuration has no way to clear them. notify_on_recovery is never
 // dropped silently: when the server holds true and the configuration does not
 // say, the update stops and asks for an explicit `false`.
-func (r *AlertResource) keepUnmanagedSettings(ctx context.Context, org, alertID string, configured types.Bool, body *AlertAPI, diags *diag.Diagnostics) {
+func (r *AlertResource) keepUnmanagedSettings(ctx context.Context, org, alertID string, config *AlertResourceModel, body *AlertAPI, diags *diag.Diagnostics) {
 	current, err := r.client.GetAlert(ctx, org, alertID)
 	if err != nil {
 		diags.AddError("Error reading alert before update",
@@ -1034,6 +1100,7 @@ func (r *AlertResource) keepUnmanagedSettings(ctx context.Context, org, alertID 
 	if current == nil {
 		current = &AlertAPI{}
 	}
+	keepServerComputed(config, current, body)
 
 	body.RunbookURL = current.RunbookURL
 	body.OncallTeam = current.OncallTeam
@@ -1044,6 +1111,7 @@ func (r *AlertResource) keepUnmanagedSettings(ctx context.Context, org, alertID 
 		body.QueryCondition.PromQLRuleMode = current.QueryCondition.PromQLRuleMode
 	}
 
+	configured := config.NotifyOnRecovery
 	notify := current.NotifyOnRecovery != nil && *current.NotifyOnRecovery
 	if !configured.IsNull() && !configured.IsUnknown() {
 		notify = configured.ValueBool()
@@ -1067,6 +1135,56 @@ func (r *AlertResource) keepUnmanagedSettings(ctx context.Context, org, alertID 
 	// recovery off in the configuration drops them along with it.
 	if notify {
 		body.RecoveryDestinations = current.RecoveryDestinations
+	}
+}
+
+// keepServerComputed sends the server's value for the Optional+Computed
+// attributes the configuration leaves unset: destinations, the trigger's
+// operator and threshold, and the aggregation's group_by. Sending what the plan
+// holds instead would send nothing for a value that is unknown, which clears
+// it, or a stale value from state.
+//
+// The trigger defaults depend on the alert family: an SLO alert has no count
+// gate, and the server rejects a non-default one. When the family changes, the
+// server's operator and threshold belong to the old family, so the new
+// family's defaults are sent instead.
+func keepServerComputed(config *AlertResourceModel, current, body *AlertAPI) {
+	if config.Destinations.IsNull() {
+		body.Destinations = current.Destinations
+		if body.Destinations == nil {
+			body.Destinations = []string{}
+		}
+	}
+
+	if config.TriggerCondition != nil {
+		isSlo := body.QueryCondition.QueryType == "slo"
+		sameFamily := isSlo == (current.QueryCondition.QueryType == "slo")
+		if config.TriggerCondition.Operator.IsNull() {
+			switch {
+			case sameFamily && current.TriggerCondition.Operator != "":
+				body.TriggerCondition.Operator = current.TriggerCondition.Operator
+			case isSlo:
+				body.TriggerCondition.Operator = "="
+			default:
+				body.TriggerCondition.Operator = ">="
+			}
+		}
+		if config.TriggerCondition.Threshold.IsNull() {
+			switch {
+			case sameFamily && current.TriggerCondition.Operator != "":
+				body.TriggerCondition.Threshold = current.TriggerCondition.Threshold
+			case isSlo:
+				body.TriggerCondition.Threshold = 0
+			default:
+				body.TriggerCondition.Threshold = 1
+			}
+		}
+	}
+
+	if config.QueryCondition != nil && config.QueryCondition.Aggregation != nil &&
+		config.QueryCondition.Aggregation.GroupBy.IsNull() &&
+		body.QueryCondition.Aggregation != nil && current.QueryCondition.Aggregation != nil {
+		body.QueryCondition.Aggregation.GroupBy = current.QueryCondition.Aggregation.GroupBy
 	}
 }
 
