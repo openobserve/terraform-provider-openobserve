@@ -88,7 +88,7 @@ func (r *DashboardResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			"dashboard_json": schema.StringAttribute{
 				Required: true,
 				Description: "The dashboard document as JSON, including `title`, `version`, `panels`, and any variables. " +
-					"Stored normalized, so formatting differences do not show up as drift.",
+					"Stored as written while the server's document still matches it, so server-added fields do not show up as drift.",
 			},
 			"title": schema.StringAttribute{
 				Computed:    true,

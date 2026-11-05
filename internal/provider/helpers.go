@@ -375,11 +375,10 @@ func reconcileJSONWith(
 		got = normalize(got)
 	}
 	if jsonSubset(want, got) {
-		normalized, err := normalizeJSON([]byte(configured.ValueString()))
-		if err != nil {
-			return serverValue
-		}
-		return types.StringValue(normalized)
+		// Return the configured text as written. Terraform compares it byte
+		// for byte with the planned value, so a re-marshalled copy fails the
+		// apply and shows a diff on every plan.
+		return configured
 	}
 	return serverValue
 }
