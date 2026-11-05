@@ -3,11 +3,14 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -29,7 +32,9 @@ type rbacAlertServer struct {
 	// forbidden folders answer 403 to an alert list; "" is the org-wide list.
 	forbidden   map[string]bool
 	foldersFail bool
-	lists       []string // `folder` query of every alert list call, in order
+	// failOnce folders answer 500 to their next alert list only.
+	failOnce map[string]bool
+	lists    []string // `folder` query of every alert list call, in order
 }
 
 func (s *rbacAlertServer) move(alertID, folderID string) {
@@ -69,6 +74,11 @@ func newRBACAlertServer(t *testing.T, s *rbacAlertServer) *Client {
 		case r.URL.Path == "/api/v2/default/alerts":
 			folder := r.URL.Query().Get("folder")
 			s.lists = append(s.lists, folder)
+			if s.failOnce[folder] {
+				delete(s.failOnce, folder)
+				http.Error(w, `{"code":500,"message":"try again"}`, http.StatusInternalServerError)
+				return
+			}
 			if s.forbidden[folder] {
 				http.Error(w, `{"code":403,"message":"Unauthorized Access"}`, http.StatusForbidden)
 				return
@@ -80,6 +90,19 @@ func newRBACAlertServer(t *testing.T, s *rbacAlertServer) *Client {
 				}
 			}
 			_ = json.NewEncoder(w).Encode(AlertListAPI{List: list})
+		case r.URL.Path == "/api/v2/default/alerts/move" && r.Method == http.MethodPatch:
+			var body struct {
+				AlertIDs    []string `json:"alert_ids"`
+				DstFolderID string   `json:"dst_folder_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			for _, id := range body.AlertIDs {
+				s.folderOf[id] = body.DstFolderID
+			}
+			_, _ = w.Write([]byte(`{"code":200,"message":"Alert moved"}`))
 		case strings.HasPrefix(r.URL.Path, "/api/v2/default/alerts/"):
 			id := strings.TrimPrefix(r.URL.Path, "/api/v2/default/alerts/")
 			if _, ok := s.folderOf[id]; !ok {
@@ -102,6 +125,10 @@ func newRBACAlertServer(t *testing.T, s *rbacAlertServer) *Client {
 	t.Cleanup(srv.Close)
 	return newClient(srv.URL, "u", "p", "default")
 }
+
+// newRun drops the client's cached listings, as a new terraform run starts
+// with a fresh provider process.
+func newRun(r *AlertResource) { r.client.alertLists.invalidate("default") }
 
 func alertSchemaState(t *testing.T) tfsdk.State {
 	t.Helper()
@@ -165,6 +192,8 @@ func TestAlertImportResolvesFolderUnderRBAC(t *testing.T) {
 		{"org, folder and alert", "default/team_a/A1", []string{"team_a"}},
 		// A wrong folder in the ID only costs a scan; the server's folder wins.
 		{"wrong folder", "default/team_b/A1", []string{"team_b", "", "default", "team_a"}},
+		// So does a folder that does not exist.
+		{"missing folder", "default/nope/A1", []string{"nope", "", "default", "team_a"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -188,6 +217,7 @@ func TestAlertImportResolvesFolderUnderRBAC(t *testing.T) {
 
 			// The refresh after import must agree, so the next plan is clean.
 			s.resetCalls()
+			newRun(r)
 			state, diags = readAlert(t, r, state)
 			if diags.HasError() || diags.WarningsCount() > 0 {
 				t.Fatalf("read after import: %v", diags)
@@ -226,6 +256,7 @@ func TestAlertReadDetectsFolderMove(t *testing.T) {
 	// Someone moves the alert in the UI; the refresh must report it so the
 	// plan shows the folder_id change.
 	s.move("A1", "team_b")
+	newRun(r)
 	state, diags = readAlert(t, r, state)
 	if diags.HasError() || diags.WarningsCount() > 0 {
 		t.Fatalf("read after move: %v", diags)
@@ -246,6 +277,7 @@ func TestAlertReadWarnsWhenFolderNotFound(t *testing.T) {
 		t.Fatalf("import: %v", diags)
 	}
 	s.move("A1", "secret")
+	newRun(r)
 	state, diags = readAlert(t, r, state)
 	if diags.HasError() {
 		t.Fatalf("read: %v", diags)
@@ -310,6 +342,7 @@ func TestAlertReadWarnsWhenFolderLookupFails(t *testing.T) {
 	s.mu.Lock()
 	s.foldersFail = true
 	s.mu.Unlock()
+	newRun(r)
 
 	state, diags = readAlert(t, r, state)
 	if diags.HasError() {
@@ -400,5 +433,193 @@ func TestAlertDataSourceByIDResolvesFolder(t *testing.T) {
 	}
 	if got.FolderID.ValueString() != "team_a" {
 		t.Errorf("folder_id = %q, want team_a", got.FolderID.ValueString())
+	}
+}
+
+// A transient failure listing the folder in state must not skip that folder:
+// the scan lists it again.
+func TestAlertReadRetriesStateFolderAfterTransientError(t *testing.T) {
+	t.Parallel()
+	s := &rbacAlertServer{
+		folderOf: map[string]string{"A1": "team_a"},
+		listable: []string{"default", "team_a"},
+		failOnce: map[string]bool{"team_a": true},
+	}
+	r := &AlertResource{client: newRBACAlertServer(t, s)}
+
+	state, diags := importAlert(t, r, "default/team_a/A1")
+	if diags.HasError() || diags.WarningsCount() > 0 {
+		t.Fatalf("import: %v", diags)
+	}
+	if got := stateFolder(t, state); got != "team_a" {
+		t.Errorf("folder_id = %q, want team_a", got)
+	}
+	want := []string{"team_a", "", "default", "team_a"}
+	if got := s.listCalls(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("list calls = %q, want %q", got, want)
+	}
+}
+
+// A refused org-wide list is expected under RBAC; when every folder listed
+// fine and none holds the alert, the user is told it was not found rather
+// than that the lookup failed.
+func TestAlertReadReportsNotFoundDespiteRefusedOrgList(t *testing.T) {
+	t.Parallel()
+	s := &rbacAlertServer{
+		folderOf:  map[string]string{"A1": "secret"},
+		listable:  []string{"default", "team_a"},
+		forbidden: map[string]bool{"": true},
+	}
+	r := &AlertResource{client: newRBACAlertServer(t, s)}
+
+	_, diags := importAlert(t, r, "default/team_a/A1")
+	if diags.HasError() {
+		t.Fatalf("import: %v", diags)
+	}
+	if got := warningSummaries(diags); len(got) != 1 || got[0] != "Alert folder not found" {
+		t.Errorf("warnings = %q, want one \"Alert folder not found\"", got)
+	}
+}
+
+// Refreshing many alerts in one run lists each folder once, even when none
+// of them is in the folder recorded in state and the reads run concurrently.
+func TestAlertReadsInOneRunListEachFolderOnce(t *testing.T) {
+	t.Parallel()
+	folderOf := map[string]string{}
+	for i := 0; i < 20; i++ {
+		folderOf[fmt.Sprintf("A%d", i)] = []string{"team_a", "team_b"}[i%2]
+	}
+	folderOf["lost"] = "secret"
+	want := map[string]string{}
+	for id, f := range folderOf {
+		want[id] = f
+	}
+	want["lost"] = ""
+	s := &rbacAlertServer{
+		folderOf:  folderOf,
+		listable:  []string{"default", "team_a", "team_b"},
+		forbidden: map[string]bool{"": true},
+	}
+	r := &AlertResource{client: newRBACAlertServer(t, s)}
+
+	var wg sync.WaitGroup
+	for id := range want {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			// The state still says default, as after upgrading from a build
+			// that never read the folder back.
+			got, err := r.client.FindAlertFolder(context.Background(), "default", id, "default")
+			if err != nil || got != want[id] {
+				t.Errorf("%s: FindAlertFolder = %q, %v; want %q", id, got, err, want[id])
+			}
+		}(id)
+	}
+	wg.Wait()
+
+	counts := map[string]int{}
+	for _, f := range s.listCalls() {
+		counts[f]++
+	}
+	for folder, n := range counts {
+		if n > 1 {
+			t.Errorf("folder %q listed %d times, want at most once", folder, n)
+		}
+	}
+	if len(counts) != 4 {
+		t.Errorf("listed %v, want default, team_a, team_b and the org-wide list", counts)
+	}
+}
+
+// A move made through the provider is visible to the same run at once; one
+// made elsewhere shows once the cached lists expire.
+func TestAlertMoveInvalidatesCachedLists(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := &rbacAlertServer{folderOf: map[string]string{"A1": "team_a"}, listable: []string{"default", "team_a", "team_b"}}
+	c := newRBACAlertServer(t, s)
+
+	if got, err := c.FindAlertFolder(ctx, "default", "A1", "team_a"); err != nil || got != "team_a" {
+		t.Fatalf("before move: %q, %v", got, err)
+	}
+	if err := c.MoveAlerts(ctx, "default", "team_b", []string{"A1"}); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	if got, err := c.FindAlertFolder(ctx, "default", "A1", "team_a"); err != nil || got != "team_b" {
+		t.Fatalf("after move: %q, %v; want team_b", got, err)
+	}
+
+	s.move("A1", "default")
+	if got, _ := c.FindAlertFolder(ctx, "default", "A1", "team_b"); got != "team_b" {
+		t.Errorf("within the TTL: %q, want the cached team_b", got)
+	}
+	c.alertLists.mu.Lock()
+	c.alertLists.now = func() time.Time { return time.Now().Add(alertListTTL + time.Second) }
+	c.alertLists.mu.Unlock()
+	if got, _ := c.FindAlertFolder(ctx, "default", "A1", "team_b"); got != "default" {
+		t.Errorf("after the TTL: %q, want default", got)
+	}
+}
+
+// A waiter must not inherit the failure of a request that ended only because
+// the caller running it went away, and a waiter whose own context ends stops
+// waiting.
+func TestAlertListCacheContexts(t *testing.T) {
+	t.Parallel()
+	var c alertListCache
+	key := alertListKey{org: "default", folder: "team_a"}
+	ok := func(e *alertListEntry) { e.alerts = []AlertListItemAPI{{AlertID: "A1"}} }
+
+	ctxA, cancelA := context.WithCancel(context.Background())
+	started, release := make(chan struct{}), make(chan struct{})
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := c.get(ctxA, key, func(e *alertListEntry) {
+			close(started)
+			<-release
+			e.err = ctxA.Err()
+		})
+		doneA <- err
+	}()
+	<-started
+
+	// The entry is registered before fetch runs, so this waits on it.
+	ctxB, cancelB := context.WithCancel(context.Background())
+	cancelB()
+	if _, err := c.get(ctxB, key, ok); !errors.Is(err, context.Canceled) {
+		t.Errorf("waiter with an ended context: err = %v, want context.Canceled", err)
+	}
+
+	doneC := make(chan *alertListEntry, 1)
+	go func() {
+		e, err := c.get(context.Background(), key, ok)
+		if err != nil {
+			t.Errorf("waiter after another caller's cancellation: %v", err)
+		}
+		doneC <- e
+	}()
+	time.Sleep(20 * time.Millisecond) // let the waiter block on the entry
+	cancelA()
+	close(release)
+	if err := <-doneA; !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled caller: err = %v, want context.Canceled", err)
+	}
+	if e := <-doneC; e == nil || len(e.alerts) != 1 {
+		t.Errorf("waiter got %+v, want the list from its own request", e)
+	}
+}
+
+// A fetch that panics releases its waiters and is not cached.
+func TestAlertListCacheFetchPanic(t *testing.T) {
+	t.Parallel()
+	var c alertListCache
+	key := alertListKey{org: "default", folders: true}
+	func() {
+		defer func() { _ = recover() }()
+		_, _ = c.get(context.Background(), key, func(*alertListEntry) { panic("boom") })
+	}()
+	e, err := c.get(context.Background(), key, func(e *alertListEntry) { e.folders = []FolderAPI{{FolderID: "default"}} })
+	if err != nil || len(e.folders) != 1 {
+		t.Fatalf("after a panicking fetch: %+v, %v", e, err)
 	}
 }

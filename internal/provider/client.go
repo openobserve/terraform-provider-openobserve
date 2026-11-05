@@ -20,6 +20,9 @@ type Client struct {
 	password   string
 	orgID      string
 	httpClient *http.Client
+
+	// alertLists caches the listings the alert folder lookup reads.
+	alertLists alertListCache
 }
 
 func newClient(baseURL, username, password, orgID string) *Client {

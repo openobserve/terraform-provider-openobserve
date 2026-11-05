@@ -27,6 +27,9 @@ type FolderListAPI struct {
 
 // CreateFolder creates a folder of the given type (`dashboards` or `alerts`).
 func (c *Client) CreateFolder(ctx context.Context, orgID, folderType string, req FolderAPI) (*FolderAPI, error) {
+	if folderType == "alerts" {
+		defer c.alertLists.invalidate(orgID)
+	}
 	path := fmt.Sprintf("/api/v2/%s/folders/%s", pathEscape(orgID), pathEscape(folderType))
 	var out FolderAPI
 	if err := c.doJSON(ctx, http.MethodPost, path, req, &out); err != nil {
@@ -68,12 +71,18 @@ func (c *Client) GetFolderByName(ctx context.Context, orgID, folderType, name st
 
 // UpdateFolder renames a folder or changes its description.
 func (c *Client) UpdateFolder(ctx context.Context, orgID, folderType, folderID string, req FolderAPI) error {
+	if folderType == "alerts" {
+		defer c.alertLists.invalidate(orgID)
+	}
 	path := fmt.Sprintf("/api/v2/%s/folders/%s/%s", pathEscape(orgID), pathEscape(folderType), pathEscape(folderID))
 	return c.do(ctx, http.MethodPut, path, req)
 }
 
 // DeleteFolder removes a folder. The folder must be empty.
 func (c *Client) DeleteFolder(ctx context.Context, orgID, folderType, folderID string) error {
+	if folderType == "alerts" {
+		defer c.alertLists.invalidate(orgID)
+	}
 	path := fmt.Sprintf("/api/v2/%s/folders/%s/%s", pathEscape(orgID), pathEscape(folderType), pathEscape(folderID))
 	return c.deleteIgnoreMissing(ctx, path)
 }

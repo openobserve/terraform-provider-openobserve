@@ -255,6 +255,7 @@ type AlertListAPI struct {
 
 // CreateAlert creates an alert in the given folder and returns its ID.
 func (c *Client) CreateAlert(ctx context.Context, orgID, folderID string, req AlertAPI) (string, error) {
+	defer c.alertLists.invalidate(orgID)
 	path := fmt.Sprintf("/api/v2/%s/alerts", pathEscape(orgID))
 	if folderID != "" {
 		path += "?folder=" + pathEscape(folderID)
@@ -282,6 +283,7 @@ func (c *Client) GetAlert(ctx context.Context, orgID, alertID string) (*AlertAPI
 
 // UpdateAlert replaces an existing alert.
 func (c *Client) UpdateAlert(ctx context.Context, orgID, alertID string, req AlertAPI) error {
+	defer c.alertLists.invalidate(orgID)
 	path := fmt.Sprintf("/api/v2/%s/alerts/%s", pathEscape(orgID), pathEscape(alertID))
 	return c.do(ctx, http.MethodPut, path, req)
 }
@@ -291,6 +293,7 @@ func (c *Client) UpdateAlert(ctx context.Context, orgID, alertID string, req Ale
 // The update endpoint deliberately leaves an alert's folder alone, so changing
 // where an alert lives is a separate call.
 func (c *Client) MoveAlerts(ctx context.Context, orgID, dstFolderID string, alertIDs []string) error {
+	defer c.alertLists.invalidate(orgID)
 	path := fmt.Sprintf("/api/v2/%s/alerts/move", pathEscape(orgID))
 	body := map[string]any{
 		"alert_ids":          alertIDs,
@@ -302,6 +305,7 @@ func (c *Client) MoveAlerts(ctx context.Context, orgID, dstFolderID string, aler
 
 // DeleteAlert removes an alert.
 func (c *Client) DeleteAlert(ctx context.Context, orgID, alertID string) error {
+	defer c.alertLists.invalidate(orgID)
 	path := fmt.Sprintf("/api/v2/%s/alerts/%s", pathEscape(orgID), pathEscape(alertID))
 	return c.deleteIgnoreMissing(ctx, path)
 }
@@ -335,17 +339,25 @@ func (c *Client) FindAlertByName(ctx context.Context, orgID, folderID, name stri
 // each alert folder in turn: with RBAC and `list_only_permitted`, the org-wide
 // list leaves out alerts the caller can read only through a folder or role
 // grant, and only a `?folder=` list shows them. It returns "" when the alert is
-// in no folder the caller can list.
+// in no folder the caller can list, and an error only when a failed listing
+// left part of the search undone.
+//
+// The listings are cached for the run (see alertListCache), so refreshing many
+// alerts lists each folder once.
 func (c *Client) FindAlertFolder(ctx context.Context, orgID, alertID, knownFolderID string) (string, error) {
 	match := func(a *AlertListItemAPI) bool { return a.AlertID == alertID }
+	searched := ""
 	if knownFolderID != "" {
-		// A failure here is not fatal: the folder in state may have been
-		// deleted after the alert was moved out of it.
-		if found, err := c.findAlertIn(ctx, orgID, knownFolderID, match); err == nil && found != nil {
+		found, err := c.findAlertIn(ctx, orgID, knownFolderID, match)
+		if found != nil {
 			return folderOf(found, knownFolderID), nil
 		}
+		// A folder that failed to list is tried again in the scan below.
+		if err == nil {
+			searched = knownFolderID
+		}
 	}
-	found, err := c.findAlert(ctx, orgID, "", knownFolderID, match)
+	found, err := c.findAlert(ctx, orgID, "", searched, match)
 	if err != nil || found == nil {
 		return "", err
 	}
@@ -356,18 +368,25 @@ func (c *Client) FindAlertFolder(ctx context.Context, orgID, alertID, knownFolde
 // folderID it searches the org-wide list, then every alert folder except
 // searched, one the caller has already listed.
 func (c *Client) findAlert(ctx context.Context, orgID, folderID, searched string, match func(*AlertListItemAPI) bool) (*AlertListItemAPI, error) {
-	found, err := c.findAlertIn(ctx, orgID, folderID, match)
-	if folderID != "" || found != nil {
-		return found, err
+	if folderID != "" {
+		return c.findAlertIn(ctx, orgID, folderID, match)
 	}
-	// An org-wide list the caller may not run is a miss, not a failure: the
-	// per-folder lists below can still succeed.
-	firstErr := err
+	// A refused or failed org-wide list is only a miss: the folder scan
+	// below covers every folder on its own.
+	found, orgErr := c.findAlertIn(ctx, orgID, "", match)
+	if found != nil {
+		return found, nil
+	}
 
-	folders, err := c.ListFolders(ctx, orgID, "alerts")
+	folders, err := c.cachedAlertFolders(ctx, orgID)
 	if err != nil {
 		return nil, err
 	}
+	if len(folders) == 0 {
+		// Nothing to scan, so a failed org-wide list was the whole search.
+		return nil, orgErr
+	}
+	var scanErr error
 	for _, folder := range folders {
 		if folder.FolderID == searched {
 			continue
@@ -377,9 +396,10 @@ func (c *Client) findAlert(ctx context.Context, orgID, folderID, searched string
 			if ctx.Err() != nil {
 				return nil, err
 			}
-			// One unreadable folder must not hide the alert in another.
-			if firstErr == nil {
-				firstErr = err
+			// One unreadable folder must not hide the alert in another, but
+			// it does mean the search was incomplete.
+			if scanErr == nil {
+				scanErr = fmt.Errorf("listing alert folder %q: %w", folder.FolderID, err)
 			}
 			continue
 		}
@@ -388,18 +408,20 @@ func (c *Client) findAlert(ctx context.Context, orgID, folderID, searched string
 			return found, nil
 		}
 	}
-	return nil, firstErr
+	return nil, scanErr
 }
 
-// findAlertIn returns the first entry of one list call matching match.
+// findAlertIn returns a copy of the first entry of one, cached, list call
+// matching match.
 func (c *Client) findAlertIn(ctx context.Context, orgID, folderID string, match func(*AlertListItemAPI) bool) (*AlertListItemAPI, error) {
-	alerts, err := c.ListAlerts(ctx, orgID, folderID)
+	alerts, err := c.cachedAlertList(ctx, orgID, folderID)
 	if err != nil {
 		return nil, err
 	}
 	for i := range alerts {
 		if match(&alerts[i]) {
-			return &alerts[i], nil
+			found := alerts[i]
+			return &found, nil
 		}
 	}
 	return nil, nil
