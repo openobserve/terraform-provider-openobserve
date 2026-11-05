@@ -7,6 +7,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-05
+
+### Added
+
+- **`openobserve_anomaly_alert`** manages OpenObserve anomaly alerts
+  ([#5](https://github.com/openobserve/terraform-provider-openobserve/issues/5)).
+  It sets the band width (`band_width`, or `alert_budget_per_day` to let the
+  server pick it), `alert_direction`, and the alert window
+  (`alert_window_buckets`, `alert_window_fire_pct`,
+  `alert_window_recover_pct`). It exposes what training chose as
+  `band_grouping`, `band_k`, `training_data_start_us` and
+  `training_data_end_us`. Invalid ranges, `band_width` together with
+  `alert_budget_per_day`, a recover percent above the fire percent and a
+  `histogram_interval` off the server's bucket grid are rejected at plan time.
+  Supports import as `{org_id}/{anomaly_id}`. Requires OpenObserve Enterprise
+  v1.1.0 or later; against an open-source or older server the resource fails
+  with a diagnostic saying so and leaves nothing behind. Changing `folder_id`
+  moves the alert in place, as the UI does; the server keeps its RBAC
+  ownership on the old folder.
+
+- **`notify_on_recovery` on `openobserve_alert`**, and on the `openobserve_alert`
+  data source ([#9](https://github.com/openobserve/terraform-provider-openobserve/issues/9)).
+  Left unset, it keeps whatever the server holds across updates. Set, it is
+  managed and drift shows in plan. An alert Terraform replaces starts from the
+  server default unless the attribute is set.
+
+- **`metadata` on `openobserve_alert_destination`**, and on its data source
+  ([#9](https://github.com/openobserve/terraform-provider-openobserve/issues/9)).
+  A map of strings, like `openobserve_pipeline_destination`. Left unset, the
+  server's metadata is kept across updates; `{}` clears it. It is sensitive
+  because OpenObserve keeps credentials such as a PagerDuty routing key there,
+  and only webhook destinations store it.
+
+- **`output_format` on `openobserve_pipeline_destination`**
+  ([#10](https://github.com/openobserve/terraform-provider-openobserve/issues/10)).
+  It takes `json`, `ndjson`, `nestedevent`, `esbulk` or `stringseparated`, and
+  defaults to `json`, which is what the server sends for a destination saved
+  without one. `esbulk` needs `output_format_index` and `stringseparated`
+  needs `output_format_separator`. A destination whose format was set outside
+  Terraform, for example `ndjson` in the UI, plans a change back to `json` on
+  the first refresh after upgrading or on import unless the configuration sets
+  `output_format`. Version 1.4.3 already reset it to `json` on any update.
+
+- **`openobserve_pipeline` condition nodes accept v2 conditions**
+  ([#11](https://github.com/openobserve/terraform-provider-openobserve/issues/11)).
+  Write the v2 group in `conditions` with the same wrapper an alert's v2
+  conditions use, `{ version = 2, conditions = { filterType = "group", ... } }`.
+  The read-back is compared by meaning, so the server's key order and operator
+  spelling do not show as a change. A document without `version` is v1 and is
+  sent exactly as before, so existing condition nodes plan clean. Plan-time
+  checks catch a v1 document marked as v2, a v2 group without the wrapper,
+  keys the server would drop, and `conditions` on a node that is not a
+  condition node. If you imported a v2 pipeline made in the UI under 1.4.3,
+  the next plan shows its conditions in the wrapped form; wrap them the same
+  way in your configuration.
+
+### Fixed
+
+- **Alert and destination updates reset settings the provider does not
+  manage** ([#9](https://github.com/openobserve/terraform-provider-openobserve/issues/9)).
+  OpenObserve replaces the whole object on update, so every apply switched
+  recovery notifications off and cleared `recovery_destinations`,
+  `keep_firing_for`, `suppress_repeats`, `runbook_url`, `oncall_team`,
+  `incident_title_template` and a PromQL alert's `promql_rule_mode`. Left
+  unset, `destinations`, `trigger_condition.operator`,
+  `trigger_condition.threshold` and `aggregation.group_by` were also reset,
+  which removed destinations added in the UI. On destinations it cleared
+  `output_format` and `destination_type_name`, which left a prebuilt
+  destination created in the UI still marked prebuilt but no longer formatted
+  as one. The provider now reads these before each update and sends them back
+  unchanged.
+
+- **`openobserve_alert` did not read `folder_id` back for alerts outside the
+  `default` folder when the user's access comes from folder grants**
+  ([#16](https://github.com/openobserve/terraform-provider-openobserve/issues/16)).
+  With RBAC and `list_only_permitted`, the org-wide alert list is empty for
+  such a user, so an import planned a move to the folder the alert was already
+  in, and a move made in the UI never showed as drift. The provider now checks
+  the folder in state first, then lists each alert folder once per run, and
+  warns when the alert is in none of them. Import also accepts
+  `{org_id}/{folder_id}/{alert_id}`, and the `openobserve_alert` data source
+  now reports `folder_id` for a lookup by ID.
+
+  After upgrading, an alert whose configuration leaves `folder_id` unset (so
+  it defaults to `"default"`) but which was moved to another folder in the UI
+  will plan a move back to `default` on the first plan. This is the drift the
+  provider could not see before. Set `folder_id` to the alert's folder to keep
+  it where it is.
+
+- **A pipeline destination created by 1.4.2 or earlier is now shown in the
+  plan** ([#10](https://github.com/openobserve/terraform-provider-openobserve/issues/10)).
+  Such a destination is stored as an alert destination, which a pipeline
+  cannot send to. The new computed `module` attribute reads `alert` for one,
+  and the plan shows an in-place update that converts it. An alert that also
+  sends to that destination stops working once it is converted. The check
+  runs only until state records `pipeline`, so a destination later re-saved as
+  an alert destination outside Terraform is not detected again.
+
 ## [1.4.3] - 2026-11-05
 
 ### Fixed
@@ -638,7 +736,8 @@ a stream or dashboard onto the new schema without touching the server.
 - Comprehensive examples for all resources and data sources
 - Apache 2.0 license
 
-[Unreleased]: https://github.com/openobserve/terraform-provider-openobserve/compare/v1.4.3...HEAD
+[Unreleased]: https://github.com/openobserve/terraform-provider-openobserve/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.5.0
 [1.4.3]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.4.3
 [1.4.2]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.4.2
 [1.4.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.4.1
