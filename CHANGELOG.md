@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   destination; if a pipeline still drops its records, recreate it (for
   example with `terraform apply -replace`).
 
+- **A pipeline condition node written as a list failed every apply.**
+  OpenObserve reads a legacy condition list back as `{"and": [...]}`, which it
+  evaluates the same way, so `openobserve_pipeline` reported "Provider produced inconsistent result after
+  apply" on `conditions`
+  ([#11](https://github.com/openobserve/terraform-provider-openobserve/issues/11)).
+  The two forms are now compared by meaning and state keeps the configured
+  list. The same comparison serves alert `conditions`. A server change that
+  alters the filter is still reported.
+
 ## [1.4.2] - 2026-10-01
 
 ### Fixed

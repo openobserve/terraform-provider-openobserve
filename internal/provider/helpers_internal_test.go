@@ -641,3 +641,121 @@ func TestApplyPipelineToModelKeepsConfiguredOperatorSpelling(t *testing.T) {
 			"inconsistent result after apply); full document: %s", op, "Contains", got)
 	}
 }
+
+// TestApplyPipelineToModelKeepsConfiguredLegacyConditionList covers
+// openobserve/terraform-provider-openobserve#11: a condition node written as a
+// bare list is read back as `{"and": [...]}`, which the server treats as the
+// same filter. State has to keep the configured list, or the apply fails with
+// an inconsistent result and every later apply fails the same way.
+func TestApplyPipelineToModelKeepsConfiguredLegacyConditionList(t *testing.T) {
+	const configured = `[{"column":"body","ignore_case":false,"operator":"=","value":"keep"}]`
+	const returned = `{"and":[{"column":"body","ignore_case":false,"operator":"=","value":"keep"}]}`
+
+	r := &PipelineResource{}
+	model := &PipelineResourceModel{
+		Nodes: []PipelineNodeModel{{
+			ID:         types.StringValue("filter"),
+			Type:       types.StringValue("condition"),
+			Conditions: types.StringValue(configured),
+		}},
+	}
+	api := &PipelineAPI{
+		Name: "p", Nodes: []PipelineNodeAPI{{
+			ID:     "filter",
+			IOType: "default",
+			Data: PipelineNodeDataAPI{
+				NodeType:   "condition",
+				Conditions: json.RawMessage(returned),
+			},
+		}},
+	}
+
+	var diags diag.Diagnostics
+	r.applyToModel(context.Background(), api, model, &diags)
+	if diags.HasError() {
+		t.Fatalf("applyToModel: %v", diags.Errors())
+	}
+	if len(model.Nodes) != 1 {
+		t.Fatalf("nodes = %d, want 1", len(model.Nodes))
+	}
+
+	var got, want any
+	if err := json.Unmarshal([]byte(model.Nodes[0].Conditions.ValueString()), &got); err != nil {
+		t.Fatalf("unmarshal state: %v", err)
+	}
+	if err := json.Unmarshal([]byte(configured), &want); err != nil {
+		t.Fatalf("unmarshal configured: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("conditions = %s, want the configured list %s (state took the server's "+
+			"`and` form, which is an inconsistent result after apply)",
+			model.Nodes[0].Conditions.ValueString(), configured)
+	}
+}
+
+// TestConditionsToModelStillReportsRealRestructuring checks that accepting
+// the legacy-list form does not hide a server change that alters the filter.
+func TestConditionsToModelStillReportsRealRestructuring(t *testing.T) {
+	for _, tc := range []struct{ name, configured, returned string }{
+		{
+			"or and and together loses the and",
+			`{"or":[{"column":"a","operator":"=","value":"1"}],"and":[{"column":"b","operator":"=","value":"2"}]}`,
+			`{"or":[{"column":"a","operator":"=","value":"1"}]}`,
+		},
+		{
+			"legacy list is a conjunction, not a disjunction",
+			`[{"column":"a","operator":"=","value":"1"}]`,
+			`{"or":[{"column":"a","operator":"=","value":"1"}]}`,
+		},
+		{
+			"different condition",
+			`[{"column":"a","operator":"=","value":"1"}]`,
+			`{"and":[{"column":"a","operator":"=","value":"2"}]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var diags diag.Diagnostics
+			got := conditionsToModel(types.StringValue(tc.configured), json.RawMessage(tc.returned), &diags)
+			if diags.HasError() {
+				t.Fatalf("conditionsToModel: %v", diags.Errors())
+			}
+			var gotDoc, wantDoc any
+			if err := json.Unmarshal([]byte(got.ValueString()), &gotDoc); err != nil {
+				t.Fatalf("unmarshal got: %v", err)
+			}
+			if err := json.Unmarshal([]byte(tc.returned), &wantDoc); err != nil {
+				t.Fatalf("unmarshal returned: %v", err)
+			}
+			if !reflect.DeepEqual(gotDoc, wantDoc) {
+				t.Errorf("conditions = %s, want the server's document %s", got.ValueString(), tc.returned)
+			}
+		})
+	}
+}
+
+// TestCanonicalConditionListRewritesLegacyListsOnly covers every place a
+// condition list can appear, and checks that plain conditions are untouched.
+func TestCanonicalConditionListRewritesLegacyListsOnly(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"top-level list", `[{"column":"a"}]`, `{"and":[{"column":"a"}]}`},
+		{"empty list", `[]`, `{"and":[]}`},
+		{"list inside or", `{"or":[[{"column":"a"}],{"column":"b"}]}`, `{"or":[{"and":[{"column":"a"}]},{"column":"b"}]}`},
+		{"list inside and", `{"and":[[{"column":"a"}]]}`, `{"and":[{"and":[{"column":"a"}]}]}`},
+		{"list under not", `{"not":[{"column":"a"}]}`, `{"not":{"and":[{"column":"a"}]}}`},
+		{"tree untouched", `{"or":[{"and":[{"column":"a"}]},{"not":{"column":"b"}}]}`, `{"or":[{"and":[{"column":"a"}]},{"not":{"column":"b"}}]}`},
+		{"plain condition untouched", `{"column":"a","operator":"=","value":"x"}`, `{"column":"a","operator":"=","value":"x"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var doc, want any
+			if err := json.Unmarshal([]byte(tc.in), &doc); err != nil {
+				t.Fatalf("unmarshal in: %v", err)
+			}
+			if err := json.Unmarshal([]byte(tc.want), &want); err != nil {
+				t.Fatalf("unmarshal want: %v", err)
+			}
+			if got := canonicalConditionList(doc); !reflect.DeepEqual(got, want) {
+				t.Errorf("canonical %s\n got %#v\nwant %#v", tc.in, got, want)
+			}
+		})
+	}
+}

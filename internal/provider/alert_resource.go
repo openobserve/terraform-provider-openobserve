@@ -1226,13 +1226,59 @@ func normalizeConditionOperators(v any) any {
 // something else is an inconsistent result after apply, which fails the apply
 // outright, and reports drift on every plan after that.
 //
-// Spelling is all this repairs. The server also restructures: a bare array
-// becomes `{"and": [...]}`, unknown keys are dropped, and a document with both
-// a top-level `or` and a top-level `and` silently loses the `and`. Those are
-// not presentational, so they are deliberately left to surface as a mismatch
-// rather than be papered over.
+// It also accepts the one restructuring that changes nothing: a bare array of
+// conditions (the legacy v1 list) is read back as `{"and": [...]}`. The
+// server evaluates a legacy list as a conjunction and serializes it that way
+// on purpose (`serialize_legacy_conditions`), so both forms mean the same
+// filter, and storing the server's form would fail every apply.
+//
+// Other restructuring is not presentational: unknown keys are dropped, and a
+// document with both a top-level `or` and a top-level `and` silently loses the
+// `and`. Those are deliberately left to surface as a mismatch rather than be
+// papered over.
 func conditionsToModel(prior types.String, raw json.RawMessage, diags *diag.Diagnostics) types.String {
-	return reconcileJSONWith(prior, raw, normalizeConditionOperators, diags)
+	return reconcileJSONWith(prior, raw, normalizeConditions, diags)
+}
+
+// normalizeConditions puts a conditions document in a comparable form: legacy
+// lists become the `and` node the server reads them back as, and operators
+// take one spelling.
+func normalizeConditions(v any) any {
+	return normalizeConditionOperators(canonicalConditionList(v))
+}
+
+// canonicalConditionList rewrites every legacy list (a bare JSON array where a
+// condition list is expected) as `{"and": [...]}`, mirroring the server's
+// serializer. A condition list is the document itself, each entry of an `or`
+// or `and` array, and the value of `not`; a legacy list's own entries are
+// plain conditions and are left alone.
+func canonicalConditionList(v any) any {
+	switch t := v.(type) {
+	case []any:
+		return map[string]any{"and": t}
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			switch k {
+			case "or", "and":
+				if entries, ok := val.([]any); ok {
+					children := make([]any, len(entries))
+					for i := range entries {
+						children[i] = canonicalConditionList(entries[i])
+					}
+					out[k] = children
+					continue
+				}
+			case "not":
+				out[k] = canonicalConditionList(val)
+				continue
+			}
+			out[k] = val
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // conditionValueToModel renders a threshold back, keeping the configured value
