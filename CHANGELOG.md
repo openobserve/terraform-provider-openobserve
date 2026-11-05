@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-11-05
+
 ### Fixed
 
 - **Every `openobserve_pipeline` update after the first failed with HTTP 409**
@@ -26,18 +28,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pipeline's `remote_stream` node cannot send to an alert destination. The
   provider now sends `module=pipeline` on create and update
   ([#10](https://github.com/openobserve/terraform-provider-openobserve/issues/10)).
-  A destination created by an earlier version is stored as an alert
-  destination; if a pipeline still drops its records, recreate it (for
-  example with `terraform apply -replace`).
+  A destination created by an earlier version is still stored as an alert
+  destination, and a plan does not show it. The server converts it in place
+  on the next update, so change any of its attributes and apply. Replacing
+  only the destination fails, because the server refuses to delete a
+  destination a pipeline still uses. `output_format` is not exposed yet.
 
 - **A pipeline condition node written as a list failed every apply.**
   OpenObserve reads a legacy condition list back as `{"and": [...]}`, which it
-  evaluates the same way, so `openobserve_pipeline` reported "Provider produced inconsistent result after
-  apply" on `conditions`
+  evaluates the same way, so `openobserve_pipeline` reported "Provider
+  produced inconsistent result after apply" on `conditions`
   ([#11](https://github.com/openobserve/terraform-provider-openobserve/issues/11)).
   The two forms are now compared by meaning and state keeps the configured
   list. The same comparison serves alert `conditions`. A server change that
-  alters the filter is still reported.
+  alters the filter is still reported. Condition nodes still cannot use the v2
+  condition format.
 
 - **A pipeline reading a metrics or traces stream failed to apply.**
   `openobserve_pipeline.stream_type` defaulted to `logs`, but OpenObserve
@@ -64,7 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after apply" and every later plan showed a diff
   ([#8](https://github.com/openobserve/terraform-provider-openobserve/issues/8)).
   The configured text is now stored as written. JSON keys no longer need to be
-  in alphabetical order when the provider is used from Pulumi.
+  in alphabetical order when the provider is used from Pulumi. A state written
+  by an earlier version holds the re-marshalled text, so the first plan after
+  upgrading can show one in-place update of the attribute; after that it stays
+  clean.
 
 ## [1.4.2] - 2026-10-01
 
@@ -630,7 +638,8 @@ a stream or dashboard onto the new schema without touching the server.
 - Comprehensive examples for all resources and data sources
 - Apache 2.0 license
 
-[Unreleased]: https://github.com/openobserve/terraform-provider-openobserve/compare/v1.4.2...HEAD
+[Unreleased]: https://github.com/openobserve/terraform-provider-openobserve/compare/v1.4.3...HEAD
+[1.4.3]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.4.3
 [1.4.2]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.4.2
 [1.4.1]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.4.1
 [1.4.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.4.0

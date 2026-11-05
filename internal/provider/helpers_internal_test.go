@@ -779,3 +779,24 @@ func TestCanonicalConditionListRewritesLegacyListsOnly(t *testing.T) {
 		})
 	}
 }
+
+// Alert conditions go through the same comparison as pipeline condition
+// nodes. A pretty-printed legacy list, nested under `or`, has to come back as
+// the configured text: the server rewrites the list as an `and` node and
+// re-marshals the document, and neither is a change in meaning.
+func TestConditionsToModelKeepsConfiguredAlertLegacyList(t *testing.T) {
+	t.Parallel()
+
+	configured := "{\n  \"or\": [\n    [{ \"column\": \"level\", \"operator\": \"=\", \"value\": \"error\", \"ignore_case\": false }],\n    { \"column\": \"code\", \"operator\": \">=\", \"value\": 500, \"ignore_case\": false }\n  ]\n}"
+	server := json.RawMessage(`{"or":[{"and":[{"column":"level","ignore_case":false,"operator":"=","value":"error"}]},{"column":"code","ignore_case":false,"operator":">=","value":500}]}`)
+
+	var diags diag.Diagnostics
+	got := conditionsToModel(types.StringValue(configured), server, &diags)
+
+	if diags.HasError() {
+		t.Fatalf("unexpected diagnostics: %+v", diags)
+	}
+	if got.ValueString() != configured {
+		t.Errorf("conditionsToModel() = %q, want the configured text %q", got.ValueString(), configured)
+	}
+}
