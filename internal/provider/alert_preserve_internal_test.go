@@ -106,9 +106,9 @@ func updateRequest(t *testing.T, res resource.Resource, plan, state, config any)
 	t.Helper()
 	p, s, c := tfValue(t, res, plan), tfValue(t, res, state), tfValue(t, res, config)
 	req := resource.UpdateRequest{
-		Plan:   tfsdk.Plan{Schema: p.Schema, Raw: p.Raw},
+		Plan:   tfsdk.Plan(p),
 		State:  s,
-		Config: tfsdk.Config{Schema: c.Schema, Raw: c.Raw},
+		Config: tfsdk.Config(c),
 	}
 	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: p.Schema, Raw: p.Raw.Copy()}}
 	return req, resp
@@ -390,7 +390,7 @@ func TestAlertCreateNotifyOnRecovery(t *testing.T) {
 			r := &AlertResource{client: newClient(srv.URL, "u", "p", "default")}
 
 			plan := tfValue(t, r, alertModel("before", tc.planned))
-			req := resource.CreateRequest{Plan: tfsdk.Plan{Schema: plan.Schema, Raw: plan.Raw}}
+			req := resource.CreateRequest{Plan: tfsdk.Plan(plan)}
 			resp := &resource.CreateResponse{State: tfsdk.State{Schema: plan.Schema, Raw: plan.Raw.Copy()}}
 			r.Create(context.Background(), req, resp)
 			if resp.Diagnostics.HasError() {
@@ -473,7 +473,7 @@ func TestAlertValidateRejectsRecoveryOnRealTime(t *testing.T) {
 	model.IsRealTime = types.BoolValue(true)
 	cfg := tfValue(t, r, model)
 	resp := &resource.ValidateConfigResponse{}
-	r.ValidateConfig(context.Background(), resource.ValidateConfigRequest{Config: tfsdk.Config{Schema: cfg.Schema, Raw: cfg.Raw}}, resp)
+	r.ValidateConfig(context.Background(), resource.ValidateConfigRequest{Config: tfsdk.Config(cfg)}, resp)
 	if !resp.Diagnostics.HasError() || !strings.Contains(resp.Diagnostics[0].Summary(), "real-time") {
 		t.Errorf("want a real-time diagnostic, got %+v", resp.Diagnostics)
 	}
@@ -655,7 +655,7 @@ func TestAlertDestinationMetadataRoundTrips(t *testing.T) {
 
 	plan := tfValue(t, r, destinationModel("https://hooks.example/a", want))
 	createResp := &resource.CreateResponse{State: tfsdk.State{Schema: plan.Schema, Raw: plan.Raw.Copy()}}
-	r.Create(context.Background(), resource.CreateRequest{Plan: tfsdk.Plan{Schema: plan.Schema, Raw: plan.Raw}}, createResp)
+	r.Create(context.Background(), resource.CreateRequest{Plan: tfsdk.Plan(plan)}, createResp)
 	if createResp.Diagnostics.HasError() {
 		t.Fatalf("create: %+v", createResp.Diagnostics)
 	}
@@ -678,7 +678,7 @@ func TestAlertDestinationMetadataRoundTrips(t *testing.T) {
 	// Unset on create: nothing is sent and state holds null, not unknown.
 	plan = tfValue(t, r, destinationModel("https://hooks.example/a", types.MapUnknown(types.StringType)))
 	createResp = &resource.CreateResponse{State: tfsdk.State{Schema: plan.Schema, Raw: plan.Raw.Copy()}}
-	r.Create(context.Background(), resource.CreateRequest{Plan: tfsdk.Plan{Schema: plan.Schema, Raw: plan.Raw}}, createResp)
+	r.Create(context.Background(), resource.CreateRequest{Plan: tfsdk.Plan(plan)}, createResp)
 	if createResp.Diagnostics.HasError() {
 		t.Fatalf("create unset: %+v", createResp.Diagnostics)
 	}
@@ -697,7 +697,7 @@ func TestAlertDestinationValidateRejectsMetadataOffHTTP(t *testing.T) {
 	model.Emails = types.SetValueMust(types.StringType, []attr.Value{types.StringValue("a@example.com")})
 	cfg := tfValue(t, r, model)
 	resp := &resource.ValidateConfigResponse{}
-	r.ValidateConfig(context.Background(), resource.ValidateConfigRequest{Config: tfsdk.Config{Schema: cfg.Schema, Raw: cfg.Raw}}, resp)
+	r.ValidateConfig(context.Background(), resource.ValidateConfigRequest{Config: tfsdk.Config(cfg)}, resp)
 	if !resp.Diagnostics.HasError() {
 		t.Fatal("want metadata on an email destination rejected")
 	}
