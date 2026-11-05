@@ -215,6 +215,7 @@ type AlertDestinationDataSourceModel struct {
 	Emails          types.Set    `tfsdk:"emails"`
 	SNSTopicARN     types.String `tfsdk:"sns_topic_arn"`
 	AWSRegion       types.String `tfsdk:"aws_region"`
+	Metadata        types.Map    `tfsdk:"metadata"`
 }
 
 func (d *AlertDestinationDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
@@ -240,6 +241,15 @@ func (d *AlertDestinationDataSource) Schema(_ context.Context, _ datasource.Sche
 			},
 			"sns_topic_arn": schema.StringAttribute{Computed: true, Description: "SNS topic ARN."},
 			"aws_region":    schema.StringAttribute{Computed: true, Description: "AWS region of the SNS topic."},
+			"metadata": schema.MapAttribute{
+				Computed:    true,
+				ElementType: types.StringType,
+				Sensitive:   true,
+				Description: "Key/value metadata stored on a webhook destination. Marked sensitive because the " +
+					"server keeps some credentials here, a PagerDuty routing key for one. An account that cannot " +
+					"edit the destination reads the values of keys the server does not know to be plain blanked, " +
+					"except URLs, which keep their origin.",
+			},
 		},
 	}
 }
@@ -281,6 +291,7 @@ func (d *AlertDestinationDataSource) Read(ctx context.Context, req datasource.Re
 	data.Emails = setFromStrings(ctx, dest.Emails, &resp.Diagnostics)
 	data.SNSTopicARN = stringFromPtr(dest.SNSTopicARN)
 	data.AWSRegion = stringFromPtr(dest.AWSRegion)
+	data.Metadata = mapFromStrings(ctx, dest.Metadata, &resp.Diagnostics)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -387,19 +398,20 @@ type AlertDataSource struct{ client *Client }
 
 // AlertDataSourceModel holds the state for an alert lookup.
 type AlertDataSourceModel struct {
-	ID           types.String `tfsdk:"id"`
-	OrgID        types.String `tfsdk:"org_id"`
-	AlertID      types.String `tfsdk:"alert_id"`
-	Name         types.String `tfsdk:"name"`
-	FolderID     types.String `tfsdk:"folder_id"`
-	StreamType   types.String `tfsdk:"stream_type"`
-	StreamName   types.String `tfsdk:"stream_name"`
-	Description  types.String `tfsdk:"description"`
-	Enabled      types.Bool   `tfsdk:"enabled"`
-	IsRealTime   types.Bool   `tfsdk:"is_real_time"`
-	Owner        types.String `tfsdk:"owner"`
-	Destinations types.Set    `tfsdk:"destinations"`
-	Tags         types.Set    `tfsdk:"tags"`
+	ID               types.String `tfsdk:"id"`
+	OrgID            types.String `tfsdk:"org_id"`
+	AlertID          types.String `tfsdk:"alert_id"`
+	Name             types.String `tfsdk:"name"`
+	FolderID         types.String `tfsdk:"folder_id"`
+	StreamType       types.String `tfsdk:"stream_type"`
+	StreamName       types.String `tfsdk:"stream_name"`
+	Description      types.String `tfsdk:"description"`
+	Enabled          types.Bool   `tfsdk:"enabled"`
+	IsRealTime       types.Bool   `tfsdk:"is_real_time"`
+	NotifyOnRecovery types.Bool   `tfsdk:"notify_on_recovery"`
+	Owner            types.String `tfsdk:"owner"`
+	Destinations     types.Set    `tfsdk:"destinations"`
+	Tags             types.Set    `tfsdk:"tags"`
 }
 
 func (d *AlertDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
@@ -432,7 +444,11 @@ func (d *AlertDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, 
 			"description":  schema.StringAttribute{Computed: true, Description: "What the alert monitors."},
 			"enabled":      schema.BoolAttribute{Computed: true, Description: "Whether the alert is evaluated."},
 			"is_real_time": schema.BoolAttribute{Computed: true, Description: "Whether the alert evaluates as data arrives."},
-			"owner":        schema.StringAttribute{Computed: true, Description: "Alert owner."},
+			"notify_on_recovery": schema.BoolAttribute{
+				Computed:    true,
+				Description: "Whether a notification is sent when the firing alert recovers.",
+			},
+			"owner": schema.StringAttribute{Computed: true, Description: "Alert owner."},
 			"destinations": schema.SetAttribute{
 				Computed:    true,
 				ElementType: types.StringType,
@@ -506,6 +522,7 @@ func (d *AlertDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 	data.Description = types.StringValue(alert.Description)
 	data.Enabled = types.BoolValue(alert.Enabled)
 	data.IsRealTime = types.BoolValue(alert.IsRealTime)
+	data.NotifyOnRecovery = types.BoolValue(alert.NotifyOnRecovery != nil && *alert.NotifyOnRecovery)
 	data.Owner = stringFromPtr(alert.Owner)
 	data.Destinations = setFromStrings(ctx, alert.Destinations, &resp.Diagnostics)
 	data.Tags = setFromStrings(ctx, alert.Tags, &resp.Diagnostics)

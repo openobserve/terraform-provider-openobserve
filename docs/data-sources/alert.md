@@ -39,6 +39,7 @@ output "alert_destinations" {
 - `enabled` (Boolean) Whether the alert is evaluated.
 - `id` (String) Data source ID in the format `{org_id}/{alert_id}`.
 - `is_real_time` (Boolean) Whether the alert evaluates as data arrives.
+- `notify_on_recovery` (Boolean) Whether a notification is sent when the firing alert recovers.
 - `owner` (String) Alert owner.
 - `stream_name` (String) Stream the alert queries.
 - `stream_type` (String) Stream type the alert queries.

@@ -4,6 +4,13 @@ resource "openobserve_alert_destination" "slack" {
   url      = var.slack_webhook_url
   method   = "post"
   template = openobserve_alert_template.slack.name
+
+  # Free-form key/value pairs kept with the destination. Leave this out to
+  # keep whatever metadata the destination already has on the server.
+  metadata = {
+    purpose       = "platform-alerts"
+    render_format = "slack"
+  }
 }
 
 resource "openobserve_alert_destination" "pagerduty" {

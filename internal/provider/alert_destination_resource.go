@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -49,6 +50,7 @@ type AlertDestinationResourceModel struct {
 	Emails          types.Set    `tfsdk:"emails"`
 	SNSTopicARN     types.String `tfsdk:"sns_topic_arn"`
 	AWSRegion       types.String `tfsdk:"aws_region"`
+	Metadata        types.Map    `tfsdk:"metadata"`
 }
 
 func (r *AlertDestinationResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -129,6 +131,33 @@ func (r *AlertDestinationResource) Schema(_ context.Context, _ resource.SchemaRe
 				Optional:    true,
 				Description: "AWS region of the SNS topic. Required when `type` is `sns`.",
 			},
+			"metadata": schema.MapAttribute{
+				Optional:    true,
+				Computed:    true,
+				ElementType: types.StringType,
+				// The server keeps some credentials here, a PagerDuty routing key
+				// for one, so the values stay out of plan output like headers do.
+				Sensitive: true,
+				// Unset, the plan carries the value last read, and the update
+				// sends what the server holds; see metadataForUpdate.
+				PlanModifiers: []planmodifier.Map{mapplanmodifier.UseStateForUnknown()},
+				Description: "Free-form key/value pairs stored with a webhook (`http`) destination, the same " +
+					"map `openobserve_pipeline_destination` carries. The OpenObserve UI records some of its own " +
+					"here, such as `prebuilt_type` and `render_format`.\n\n" +
+					"Leave it unset to keep whatever the server holds: the provider reads the current map and " +
+					"sends it back on every update, so metadata written by the UI or the API is not wiped by an " +
+					"unrelated change. Set it to manage the whole map, and keys added elsewhere then show as " +
+					"drift. Set it to `{}` to clear it. Removing the attribute from a configuration that set it " +
+					"stops managing it and leaves the server's map as it is. The map is read again at apply " +
+					"time, so if it changed on the server after the plan was made, the server's map is still " +
+					"kept, and Terraform reports an inconsistent result for this attribute; the next plan is " +
+					"clean.\n\n" +
+					"Only webhook destinations store metadata, so a non-empty map is rejected with `type` `email` " +
+					"or `sns`.\n\n" +
+					"Marked sensitive, unlike on `openobserve_pipeline_destination`, because the server keeps some " +
+					"credentials here, a PagerDuty routing key for one. The cost is that a plan shows that the map " +
+					"changed but not which key; `nonsensitive()` reveals it where that is acceptable.",
+			},
 		},
 	}
 }
@@ -149,6 +178,15 @@ func (r *AlertDestinationResource) ValidateConfig(ctx context.Context, req resou
 	destType := config.DestinationType.ValueString()
 	if destType == "" {
 		destType = "http"
+	}
+
+	if !config.Metadata.IsNull() && !config.Metadata.IsUnknown() && len(config.Metadata.Elements()) > 0 && destType != "http" {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("metadata"),
+			"Metadata is only stored on webhook destinations",
+			fmt.Sprintf("The server keeps `metadata` only for `type` `http` and drops it for `%s`, so it would "+
+				"never read back. Remove `metadata`, or use an `http` destination.", destType),
+		)
 	}
 
 	switch destType {
@@ -208,6 +246,10 @@ func (r *AlertDestinationResource) Create(ctx context.Context, req resource.Crea
 		return
 	}
 
+	// Unset on create means none was sent, so none is stored.
+	if plan.Metadata.IsUnknown() {
+		plan.Metadata = types.MapNull(types.StringType)
+	}
 	plan.OrgID = types.StringValue(org)
 	plan.ID = types.StringValue(alertDestinationResourceID(org, plan.Name.ValueString()))
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -258,6 +300,24 @@ func (r *AlertDestinationResource) Update(ctx context.Context, req resource.Upda
 	}
 	name := plan.Name.ValueString()
 
+	var configuredMetadata types.Map
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("metadata"), &configuredMetadata)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if configuredMetadata.IsNull() {
+		body.Metadata = r.metadataForUpdate(ctx, org, name, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		// A `{}` carried over from state, after the attribute was removed from
+		// the configuration, stays `{}` when the server holds nothing.
+		keptEmpty := !plan.Metadata.IsNull() && !plan.Metadata.IsUnknown() && len(plan.Metadata.Elements()) == 0
+		if len(body.Metadata) != 0 || !keptEmpty {
+			plan.Metadata = mapFromStrings(ctx, body.Metadata, &resp.Diagnostics)
+		}
+	}
+
 	if err := r.client.UpdateAlertDestination(ctx, org, name, body); err != nil {
 		resp.Diagnostics.AddError("Error updating alert destination", err.Error())
 		return
@@ -266,6 +326,27 @@ func (r *AlertDestinationResource) Update(ctx context.Context, req resource.Upda
 	plan.OrgID = types.StringValue(org)
 	plan.ID = types.StringValue(alertDestinationResourceID(org, name))
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// metadataForUpdate returns the metadata the server holds, for an update whose
+// configuration leaves `metadata` unset.
+//
+// The update endpoint replaces the whole destination, so an update without
+// metadata clears it. The current map is read just before the write rather
+// than taken from state, which may be stale or, for state written by a release
+// that did not know the attribute, empty.
+func (r *AlertDestinationResource) metadataForUpdate(ctx context.Context, org, name string, diags *diag.Diagnostics) map[string]string {
+	current, err := r.client.GetAlertDestination(ctx, org, name)
+	if err != nil {
+		diags.AddError("Error reading alert destination before update",
+			"metadata is not set in the configuration, so the provider reads the server's value to keep "+
+				"it, and that read failed: "+err.Error())
+		return nil
+	}
+	if current == nil {
+		return nil
+	}
+	return current.Metadata
 }
 
 func (r *AlertDestinationResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -332,6 +413,7 @@ func (r *AlertDestinationResource) destinationFromModel(ctx context.Context, mod
 		Emails:          emails,
 		SNSTopicARN:     optString(model.SNSTopicARN),
 		AWSRegion:       optString(model.AWSRegion),
+		Metadata:        stringsFromMap(ctx, model.Metadata, diags),
 	}
 }
 
@@ -345,6 +427,14 @@ func (r *AlertDestinationResource) applyDestinationToModel(ctx context.Context, 
 	model.Headers = mapFromStrings(ctx, dest.Headers, diags)
 	model.SNSTopicARN = stringFromPtr(dest.SNSTopicARN)
 	model.AWSRegion = stringFromPtr(dest.AWSRegion)
+
+	// The server reports no metadata as an empty map. A configured `{}` stays
+	// `{}`; anything else that is empty reads as null, so an unset attribute
+	// shows no drift.
+	configuredEmpty := !model.Metadata.IsNull() && !model.Metadata.IsUnknown() && len(model.Metadata.Elements()) == 0
+	if len(dest.Metadata) != 0 || !configuredEmpty {
+		model.Metadata = mapFromStrings(ctx, dest.Metadata, diags)
+	}
 
 	if len(dest.Emails) == 0 {
 		model.Emails = types.SetNull(types.StringType)

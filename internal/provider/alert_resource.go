@@ -14,6 +14,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
@@ -105,6 +106,7 @@ type AlertResourceModel struct {
 	CreatesIncident   types.Bool                  `tfsdk:"creates_incident"`
 	Workflows         types.Set                   `tfsdk:"workflows"`
 	PendingPeriodSec  types.Int64                 `tfsdk:"pending_period_sec"`
+	NotifyOnRecovery  types.Bool                  `tfsdk:"notify_on_recovery"`
 	Deduplication     *AlertDeduplicationModel    `tfsdk:"deduplication"`
 	QueryCondition    *AlertQueryConditionModel   `tfsdk:"query_condition"`
 	TriggerCondition  *AlertTriggerConditionModel `tfsdk:"trigger_condition"`
@@ -355,6 +357,34 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"a brief spike: the condition has to still be true this many seconds later. It is the " +
 					"difference between paging on one slow minute and paging on a sustained problem.\n\n" +
 					"Not accepted on a real-time alert, which has no schedule to wait across.",
+			},
+			"notify_on_recovery": schema.BoolAttribute{
+				Optional: true,
+				Computed: true,
+				// No default, deliberately. The server replaces the whole alert on
+				// update, so a default would turn the flag off on every alert that
+				// had it switched on outside Terraform. Unset, the plan carries the
+				// value last read and the update sends whatever the server holds;
+				// see keepRecoverySettings.
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+				Description: "Send a notification when a firing alert recovers, that is, when its condition " +
+					"clears. A multi-alert sends one per recovered group.\n\n" +
+					"Leave it unset to keep whatever the server holds: the provider reads the current value " +
+					"and sends it back on every update, so a flag switched on in the UI or through the API is " +
+					"never turned off by an unrelated change. Set it to manage the flag, and a change made " +
+					"elsewhere then shows as drift. A new alert created without it takes the server default, " +
+					"`false`. Removing the attribute from a configuration that set it stops managing it and " +
+					"leaves the server value as it is.\n\n" +
+					"The value is read again at apply time, so if it changed on the server after the plan was " +
+					"made (or the plan used `-refresh=false`), the server value is still kept, and Terraform " +
+					"reports an inconsistent result for this attribute; the next plan is clean.\n\n" +
+					"The recovery settings this resource does not expose yet, `recovery_destinations`, " +
+					"`keep_firing_for` and `suppress_repeats`, are carried over from the server on every update " +
+					"too, with two exceptions the server forces: `recovery_destinations` is dropped when " +
+					"`notify_on_recovery` is `false`, and all three are dropped on a real-time alert.\n\n" +
+					"Not accepted on a real-time alert, which keeps no state to recover from. Making an alert " +
+					"real-time while the server holds `true` and this attribute is unset plans cleanly but fails " +
+					"at apply, asking for `notify_on_recovery = false`.",
 			},
 			"tz_offset": schema.Int64Attribute{
 				Optional:    true,
@@ -804,6 +834,15 @@ func (r *AlertResource) ValidateConfig(ctx context.Context, req resource.Validat
 		}
 	}
 
+	if knownAndSet(config.NotifyOnRecovery) && config.NotifyOnRecovery.ValueBool() && config.IsRealTime.ValueBool() {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("notify_on_recovery"),
+			"Recovery notifications do not apply to a real-time alert",
+			"A real-time alert keeps no state between records, so it never recovers and the server rejects "+
+				"`notify_on_recovery = true` on one. Remove `notify_on_recovery`, or drop `is_real_time`.",
+		)
+	}
+
 	if config.TriggerCondition != nil &&
 		config.TriggerCondition.FrequencyType.ValueString() == "cron" &&
 		config.TriggerCondition.Cron.IsNull() && !config.TriggerCondition.Cron.IsUnknown() {
@@ -912,6 +951,16 @@ func (r *AlertResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	}
 	body.ID = alertID
 
+	var configuredRecovery types.Bool
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("notify_on_recovery"), &configuredRecovery)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	r.keepRecoverySettings(ctx, org, alertID, configuredRecovery, &body, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	if err := r.client.UpdateAlert(ctx, org, alertID, body); err != nil {
 		resp.Diagnostics.AddError("Error updating alert", err.Error())
 		return
@@ -935,6 +984,58 @@ func (r *AlertResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// keepRecoverySettings fills in the recovery settings an update sends.
+//
+// The update endpoint replaces the whole alert, so any field the body leaves
+// out is reset. A configured notify_on_recovery is sent as written. An unset
+// one, and the recovery settings that have no attribute (recovery_destinations,
+// keep_firing_for, suppress_repeats), are read from the server just before the
+// write. State is not used for this: it may be stale (a plan made with
+// -refresh=false) or written by a release that did not know the attribute.
+//
+// A real-time alert can carry none of these, and the server rejects an alert
+// that does. The settings without an attribute are dropped for one, because
+// the configuration has no way to clear them. notify_on_recovery is never
+// dropped silently: when the server holds true and the configuration does not
+// say, the update stops and asks for an explicit `false`.
+func (r *AlertResource) keepRecoverySettings(ctx context.Context, org, alertID string, configured types.Bool, body *AlertAPI, diags *diag.Diagnostics) {
+	current, err := r.client.GetAlert(ctx, org, alertID)
+	if err != nil {
+		diags.AddError("Error reading alert before update",
+			"The update replaces the whole alert, so the provider reads the recovery settings it does not "+
+				"manage, to send them back, and that read failed: "+err.Error())
+		return
+	}
+	if current == nil {
+		current = &AlertAPI{}
+	}
+
+	notify := current.NotifyOnRecovery != nil && *current.NotifyOnRecovery
+	if !configured.IsNull() && !configured.IsUnknown() {
+		notify = configured.ValueBool()
+	} else if notify && body.IsRealTime {
+		diags.AddAttributeError(
+			path.Root("notify_on_recovery"),
+			"Recovery notifications are on for this alert",
+			"The alert has notify_on_recovery switched on, which a real-time alert cannot have. The provider "+
+				"does not turn it off unasked: set `notify_on_recovery = false` to make this a real-time alert.",
+		)
+		return
+	}
+	body.NotifyOnRecovery = &notify
+
+	if body.IsRealTime {
+		return
+	}
+	body.KeepFiringFor = current.KeepFiringFor
+	body.SuppressRepeats = current.SuppressRepeats
+	// The server refuses recovery destinations without the switch, so turning
+	// recovery off in the configuration drops them along with it.
+	if notify {
+		body.RecoveryDestinations = current.RecoveryDestinations
+	}
 }
 
 func (r *AlertResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -1018,6 +1119,7 @@ func (r *AlertResource) alertFromModel(ctx context.Context, model *AlertResource
 		Owner:            optString(model.Owner),
 		Priority:         optInt64(model.Priority),
 		PendingPeriodSec: model.PendingPeriodSec.ValueInt64(),
+		NotifyOnRecovery: optBool(model.NotifyOnRecovery),
 		Tags:             stringsFromSet(ctx, model.Tags, diags),
 	}
 	if folderID != "" {
@@ -1379,6 +1481,7 @@ func (r *AlertResource) applyAlertToModel(ctx context.Context, alert *AlertAPI, 
 	}
 	model.TZOffset = types.Int64Value(int64(alert.TZOffset))
 	model.PendingPeriodSec = types.Int64Value(alert.PendingPeriodSec)
+	model.NotifyOnRecovery = types.BoolValue(alert.NotifyOnRecovery != nil && *alert.NotifyOnRecovery)
 	model.Template = stringFromPtr(alert.Template)
 	model.Owner = stringFromPtr(alert.Owner)
 	model.Priority = int64FromPtr(alert.Priority)

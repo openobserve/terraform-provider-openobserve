@@ -51,6 +51,7 @@ resource "openobserve_alert" "example" {
 - `aws_region` (String) AWS region of the SNS topic.
 - `emails` (Set of String) Recipient addresses for email destinations.
 - `id` (String) Data source ID in the format `{org_id}/{name}`.
+- `metadata` (Map of String, Sensitive) Key/value metadata stored on a webhook destination. Marked sensitive because the server keeps some credentials here, a PagerDuty routing key for one. An account that cannot edit the destination reads the values of keys the server does not know to be plain blanked, except URLs, which keep their origin.
 - `method` (String) HTTP method used for webhook delivery.
 - `skip_tls_verify` (Boolean) Whether TLS verification is skipped.
 - `sns_topic_arn` (String) SNS topic ARN.

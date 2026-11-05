@@ -25,6 +25,10 @@ resource "openobserve_alert" "high_error_rate" {
 
   destinations = [openobserve_alert_destination.slack.name]
 
+  # Also notify when the error volume drops back below the threshold. Leave
+  # this out to keep whatever the alert has on the server.
+  notify_on_recovery = true
+
   query_condition {
     type = "sql"
     sql  = "SELECT count(*) AS total FROM \"app_logs\" WHERE level = 'error'"
@@ -207,6 +211,15 @@ resource "openobserve_alert" "burning_fast" {
 - `enabled` (Boolean) Whether the alert is evaluated. Disabled alerts stay configured but never fire.
 - `folder_id` (String) Alert folder that holds this alert. Use `openobserve_folder` with `folder_type = "alerts"` to create one.
 - `is_real_time` (Boolean) Evaluate as data arrives instead of on a schedule.
+- `notify_on_recovery` (Boolean) Send a notification when a firing alert recovers, that is, when its condition clears. A multi-alert sends one per recovered group.
+
+Leave it unset to keep whatever the server holds: the provider reads the current value and sends it back on every update, so a flag switched on in the UI or through the API is never turned off by an unrelated change. Set it to manage the flag, and a change made elsewhere then shows as drift. A new alert created without it takes the server default, `false`. Removing the attribute from a configuration that set it stops managing it and leaves the server value as it is.
+
+The value is read again at apply time, so if it changed on the server after the plan was made (or the plan used `-refresh=false`), the server value is still kept, and Terraform reports an inconsistent result for this attribute; the next plan is clean.
+
+The recovery settings this resource does not expose yet, `recovery_destinations`, `keep_firing_for` and `suppress_repeats`, are carried over from the server on every update too, with two exceptions the server forces: `recovery_destinations` is dropped when `notify_on_recovery` is `false`, and all three are dropped on a real-time alert.
+
+Not accepted on a real-time alert, which keeps no state to recover from. Making an alert real-time while the server holds `true` and this attribute is unset plans cleanly but fails at apply, asking for `notify_on_recovery = false`.
 - `org_id` (String) Organization the alert belongs to. Defaults to the provider's `org_id`.
 - `owner` (String) Email of the alert owner. Defaults to the account the provider authenticates as.
 - `pending_period_sec` (Number) How long the condition must hold before the alert fires, in seconds.

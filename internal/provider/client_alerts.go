@@ -232,6 +232,16 @@ type AlertAPI struct {
 	Workflows        []string                 `json:"workflows,omitempty"`
 	Deduplication    *AlertDeduplicationAPI   `json:"deduplication,omitempty"`
 	PendingPeriodSec int64                    `json:"pending_period_sec"`
+	// NotifyOnRecovery is a pointer so that a create which leaves it unset
+	// sends nothing and takes the server default. An update always sends a
+	// value, because the server replaces the whole alert and an absent field
+	// would reset it to false.
+	NotifyOnRecovery *bool `json:"notify_on_recovery,omitempty"`
+	// The recovery settings below have no attribute yet. They are read and
+	// sent back unchanged on update, so the whole-alert replace keeps them.
+	RecoveryDestinations []string `json:"recovery_destinations,omitempty"`
+	KeepFiringFor        int64    `json:"keep_firing_for,omitempty"`
+	SuppressRepeats      bool     `json:"suppress_repeats,omitempty"`
 }
 
 // AlertListItemAPI is one entry of the alerts list response.

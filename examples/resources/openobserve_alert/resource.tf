@@ -7,6 +7,10 @@ resource "openobserve_alert" "high_error_rate" {
 
   destinations = [openobserve_alert_destination.slack.name]
 
+  # Also notify when the error volume drops back below the threshold. Leave
+  # this out to keep whatever the alert has on the server.
+  notify_on_recovery = true
+
   query_condition {
     type = "sql"
     sql  = "SELECT count(*) AS total FROM \"app_logs\" WHERE level = 'error'"
