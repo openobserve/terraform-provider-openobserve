@@ -4,11 +4,14 @@ page_title: "openobserve_alert_destination Resource - openobserve"
 subcategory: ""
 description: |-
   Manages an alert destination: where OpenObserve delivers a notification when an alert fires. A destination is a webhook (http), a set of email recipients (email), or an AWS SNS topic (sns).
+  OpenObserve replaces the whole destination on update. Settings this resource does not manage yet are read from the server before each update and sent back unchanged, so a prebuilt destination created in the UI (PagerDuty, Jira, Splunk and the like) keeps its kind: output_format and destination_type_name. metadata is kept the same way while it is unset.
 ---
 
 # openobserve_alert_destination (Resource)
 
 Manages an alert destination: where OpenObserve delivers a notification when an alert fires. A destination is a webhook (`http`), a set of email recipients (`email`), or an AWS SNS topic (`sns`).
+
+OpenObserve replaces the whole destination on update. Settings this resource does not manage yet are read from the server before each update and sent back unchanged, so a prebuilt destination created in the UI (PagerDuty, Jira, Splunk and the like) keeps its kind: `output_format` and `destination_type_name`. `metadata` is kept the same way while it is unset.
 
 ## Example Usage
 
@@ -19,6 +22,13 @@ resource "openobserve_alert_destination" "slack" {
   url      = var.slack_webhook_url
   method   = "post"
   template = openobserve_alert_template.slack.name
+
+  # Free-form key/value pairs kept with the destination. Leave this out to
+  # keep whatever metadata the destination already has on the server.
+  metadata = {
+    purpose       = "platform-alerts"
+    render_format = "slack"
+  }
 }
 
 resource "openobserve_alert_destination" "pagerduty" {
@@ -61,6 +71,13 @@ resource "openobserve_alert_destination" "sns" {
 - `aws_region` (String) AWS region of the SNS topic. Required when `type` is `sns`.
 - `emails` (Set of String) Recipient addresses. Required when `type` is `email`. Every address must belong to a user in the organization.
 - `headers` (Map of String, Sensitive) Additional HTTP headers sent with each webhook request, for example an authorization header.
+- `metadata` (Map of String, Sensitive) Free-form key/value pairs stored with a webhook (`http`) destination, the same map `openobserve_pipeline_destination` carries. The OpenObserve UI records some of its own here, such as `prebuilt_type` and `render_format`.
+
+Leave it unset to keep whatever the server holds: the provider reads the current map and sends it back on every update, so metadata written by the UI or the API is not wiped by an unrelated change. Set it to manage the whole map, and keys added elsewhere then show as drift. Set it to `{}` to clear it. Removing the attribute from a configuration that set it stops managing it and leaves the server's map as it is. The map is read again at apply time, so if it changed on the server after the plan was made, the update still sends the server's map. State records the planned map for that apply and picks up the server's on the next refresh, with no diff.
+
+Only webhook destinations store metadata, so a non-empty map is rejected with `type` `email` or `sns`.
+
+Marked sensitive, unlike on `openobserve_pipeline_destination`, because the server keeps some credentials here, a PagerDuty routing key for one. The cost is that a plan shows that the map changed but not which key; `nonsensitive()` reveals it where that is acceptable.
 - `method` (String) HTTP method for webhook delivery: `post` (default), `put`, or `get`.
 - `org_id` (String) Organization the destination belongs to. Defaults to the provider's `org_id`.
 - `skip_tls_verify` (Boolean) Skip TLS certificate verification when calling the webhook.

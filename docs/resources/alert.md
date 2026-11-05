@@ -5,6 +5,7 @@ subcategory: ""
 description: |-
   Manages an OpenObserve alert.
   An alert evaluates a query against a stream and notifies one or more destinations when the result crosses a threshold. Set is_real_time for alerts that fire as matching data arrives; leave it false for scheduled alerts driven by trigger_condition.frequency.
+  OpenObserve replaces the whole alert on update. Settings this resource does not manage yet are read from the server before each update and sent back unchanged, so a value set in the UI or through the API survives: runbook_url, oncall_team, incident_title_template, recovery_destinations, keep_firing_for, suppress_repeats and query_condition.promql_rule_mode. See notify_on_recovery for the cases where the server forces some of them off.
 ---
 
 # openobserve_alert (Resource)
@@ -12,6 +13,8 @@ description: |-
 Manages an OpenObserve alert.
 
 An alert evaluates a query against a stream and notifies one or more destinations when the result crosses a threshold. Set `is_real_time` for alerts that fire as matching data arrives; leave it false for scheduled alerts driven by `trigger_condition.frequency`.
+
+OpenObserve replaces the whole alert on update. Settings this resource does not manage yet are read from the server before each update and sent back unchanged, so a value set in the UI or through the API survives: `runbook_url`, `oncall_team`, `incident_title_template`, `recovery_destinations`, `keep_firing_for`, `suppress_repeats` and `query_condition.promql_rule_mode`. See `notify_on_recovery` for the cases where the server forces some of them off.
 
 ## Example Usage
 
@@ -24,6 +27,10 @@ resource "openobserve_alert" "high_error_rate" {
   description = "Error volume is above the normal baseline"
 
   destinations = [openobserve_alert_destination.slack.name]
+
+  # Also notify when the error volume drops back below the threshold. Leave
+  # this out to keep whatever the alert has on the server.
+  notify_on_recovery = true
 
   query_condition {
     type = "sql"
@@ -204,9 +211,22 @@ resource "openobserve_alert" "burning_fast" {
 - `deduplication` (Block, Optional) Collapse repeated firings of the same underlying issue into one notification. (see [below for nested schema](#nestedblock--deduplication))
 - `description` (String) What the alert monitors.
 - `destinations` (Set of String) Names of the `openobserve_alert_destination` resources notified when the alert fires.
+
+Leave it unset to keep whatever the server holds across updates, so destinations added in the UI or through the API are not removed by an unrelated change. Set it to manage the list, and a change made elsewhere then shows as drift.
 - `enabled` (Boolean) Whether the alert is evaluated. Disabled alerts stay configured but never fire.
 - `folder_id` (String) Alert folder that holds this alert. Use `openobserve_folder` with `folder_type = "alerts"` to create one.
 - `is_real_time` (Boolean) Evaluate as data arrives instead of on a schedule.
+- `notify_on_recovery` (Boolean) Send a notification when a firing alert recovers, that is, when its condition clears. A multi-alert sends one per recovered group.
+
+Leave it unset to keep whatever the server holds across updates: the provider reads the current value and sends it back on every update, so a flag switched on in the UI or through the API is not turned off by an unrelated change. Set it to manage the flag, and a change made elsewhere then shows as drift. An alert created without it, including one Terraform replaces (a change to `stream_type` or `stream_name`), starts from the server default, `false`, so configure it where it must survive a replacement. Removing the attribute from a configuration that set it stops managing it and leaves the server value as it is.
+
+While it is `true`, the server checks the recovery path on every save, update included, and refuses one it could not deliver, for example a PagerDuty destination with no integration key, or a platform destination whose template does not render a JSON object. An update that left the flag on can therefore fail on a destination that has not changed.
+
+The value is read again at apply time, so if it changed on the server after the plan was made (or the plan used `-refresh=false`), the update still sends the server's value. State records the planned value for that apply and picks up the server's on the next refresh, with no diff.
+
+The recovery settings this resource does not expose yet, `recovery_destinations`, `keep_firing_for` and `suppress_repeats`, are carried over from the server on every update too, with two exceptions the server forces: `recovery_destinations` is dropped when `notify_on_recovery` is `false`, and all three are dropped on a real-time alert.
+
+Not accepted on a real-time alert, which keeps no state to recover from. Making an alert real-time while the server holds `true` and this attribute is unset plans cleanly but fails at apply, asking for `notify_on_recovery = false`.
 - `org_id` (String) Organization the alert belongs to. Defaults to the provider's `org_id`.
 - `owner` (String) Email of the alert owner. Defaults to the account the provider authenticates as.
 - `pending_period_sec` (Number) How long the condition must hold before the alert fires, in seconds.
@@ -272,6 +292,8 @@ Optional:
 - `group_by` (List of String) Columns to group by before aggregating.
 
 On a `sql` multi-alert this can be left empty and the server fills it in from the query's own GROUP BY, so the value read back may differ from the empty list that was sent.
+
+Left unset on an existing alert, the server's list is kept across updates.
 - `having` (Block, Optional) Critical threshold applied to the aggregate value. (see [below for nested schema](#nestedblock--query_condition--aggregation--having))
 - `multi_alert` (Boolean) Evaluate and notify per group instead of collapsing to a single result.
 
@@ -351,14 +373,14 @@ Optional:
 - `frequency` (Number) How often the alert runs, in minutes. Used when `frequency_type` is `minutes`.
 - `frequency_type` (String) Scheduling style: `minutes` (default) or `cron`.
 - `notify_on_warning` (Boolean) Whether a warning-level match sends a notification. Defaults to true; set false to record warnings without paging.
-- `operator` (String) Operator comparing the result to `threshold`. Defaults to `>=`.
+- `operator` (String) Operator comparing the result to `threshold`. Defaults to `>=` on a new alert; left unset on an existing one, the server's operator is kept across updates.
 
 Only the symbol operators are accepted here. A threshold compares a row count against a number, so `Contains` and the other word-shaped operators have no meaning; the server answers `HTTP 500: cannot convert contains into a trigger threshold operator`, which is why this is rejected during `plan` instead.
 
 Leave unset on an SLO alert: that family has no count gate, and its comparison lives on `query_condition.slo_condition.operator`.
 - `period` (Number) Lookback window in minutes that each evaluation queries.
 - `silence` (Number) Minutes to stay quiet after firing before the alert may fire again.
-- `threshold` (Number) Critical threshold the result is compared against. Defaults to `1`.
+- `threshold` (Number) Critical threshold the result is compared against. Defaults to `1` on a new alert; left unset on an existing one, the server's threshold is kept across updates.
 
 Leave unset on an SLO alert: that family has no count gate, and its threshold lives on `query_condition.slo_condition.critical`.
 - `timezone` (String) Timezone for the cron schedule, for example `America/New_York`.

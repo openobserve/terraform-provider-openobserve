@@ -14,8 +14,12 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
@@ -105,6 +109,7 @@ type AlertResourceModel struct {
 	CreatesIncident   types.Bool                  `tfsdk:"creates_incident"`
 	Workflows         types.Set                   `tfsdk:"workflows"`
 	PendingPeriodSec  types.Int64                 `tfsdk:"pending_period_sec"`
+	NotifyOnRecovery  types.Bool                  `tfsdk:"notify_on_recovery"`
 	Deduplication     *AlertDeduplicationModel    `tfsdk:"deduplication"`
 	QueryCondition    *AlertQueryConditionModel   `tfsdk:"query_condition"`
 	TriggerCondition  *AlertTriggerConditionModel `tfsdk:"trigger_condition"`
@@ -246,7 +251,12 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 		Description: "Manages an OpenObserve alert.\n\n" +
 			"An alert evaluates a query against a stream and notifies one or more destinations when the result crosses " +
 			"a threshold. Set `is_real_time` for alerts that fire as matching data arrives; leave it false for scheduled " +
-			"alerts driven by `trigger_condition.frequency`.",
+			"alerts driven by `trigger_condition.frequency`.\n\n" +
+			"OpenObserve replaces the whole alert on update. Settings this resource does not manage yet are read " +
+			"from the server before each update and sent back unchanged, so a value set in the UI or through the " +
+			"API survives: `runbook_url`, `oncall_team`, `incident_title_template`, `recovery_destinations`, " +
+			"`keep_firing_for`, `suppress_repeats` and `query_condition.promql_rule_mode`. See " +
+			"`notify_on_recovery` for the cases where the server forces some of them off.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -310,7 +320,13 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Optional:    true,
 				Computed:    true,
 				ElementType: types.StringType,
-				Description: "Names of the `openobserve_alert_destination` resources notified when the alert fires.",
+				// Unset, the plan carries the list last read and the update sends
+				// the server's; see keepUnmanagedSettings.
+				PlanModifiers: []planmodifier.Set{setplanmodifier.UseStateForUnknown()},
+				Description: "Names of the `openobserve_alert_destination` resources notified when the alert fires.\n\n" +
+					"Leave it unset to keep whatever the server holds across updates, so destinations added in " +
+					"the UI or through the API are not removed by an unrelated change. Set it to manage the " +
+					"list, and a change made elsewhere then shows as drift.",
 			},
 			"template": schema.StringAttribute{
 				Optional: true,
@@ -355,6 +371,40 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"a brief spike: the condition has to still be true this many seconds later. It is the " +
 					"difference between paging on one slow minute and paging on a sustained problem.\n\n" +
 					"Not accepted on a real-time alert, which has no schedule to wait across.",
+			},
+			"notify_on_recovery": schema.BoolAttribute{
+				Optional: true,
+				Computed: true,
+				// No default, deliberately. The server replaces the whole alert on
+				// update, so a default would turn the flag off on every alert that
+				// had it switched on outside Terraform. Unset, the plan carries the
+				// value last read and the update sends whatever the server holds;
+				// see keepUnmanagedSettings.
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+				Description: "Send a notification when a firing alert recovers, that is, when its condition " +
+					"clears. A multi-alert sends one per recovered group.\n\n" +
+					"Leave it unset to keep whatever the server holds across updates: the provider reads the " +
+					"current value and sends it back on every update, so a flag switched on in the UI or through " +
+					"the API is not turned off by an unrelated change. Set it to manage the flag, and a change " +
+					"made elsewhere then shows as drift. An alert created without it, including one Terraform " +
+					"replaces (a change to `stream_type` or `stream_name`), starts from the server default, " +
+					"`false`, so configure it where it must survive a replacement. Removing the attribute from a " +
+					"configuration that set it stops managing it and leaves the server value as it is.\n\n" +
+					"While it is `true`, the server checks the recovery path on every save, update included, " +
+					"and refuses one it could not deliver, for example a PagerDuty destination with no " +
+					"integration key, or a platform destination whose template does not render a JSON object. " +
+					"An update that left the flag on can therefore fail on a destination that has not changed.\n\n" +
+					"The value is read again at apply time, so if it changed on the server after the plan was " +
+					"made (or the plan used `-refresh=false`), the update still sends the server's value. State " +
+					"records the planned value for that apply and picks up the server's on the next refresh, " +
+					"with no diff.\n\n" +
+					"The recovery settings this resource does not expose yet, `recovery_destinations`, " +
+					"`keep_firing_for` and `suppress_repeats`, are carried over from the server on every update " +
+					"too, with two exceptions the server forces: `recovery_destinations` is dropped when " +
+					"`notify_on_recovery` is `false`, and all three are dropped on a real-time alert.\n\n" +
+					"Not accepted on a real-time alert, which keeps no state to recover from. Making an alert " +
+					"real-time while the server holds `true` and this attribute is unset plans cleanly but fails " +
+					"at apply, asking for `notify_on_recovery = false`.",
 			},
 			"tz_offset": schema.Int64Attribute{
 				Optional:    true,
@@ -447,13 +497,15 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 						Description: "Aggregation applied before the threshold comparison. Only used when `type` is `custom`.",
 						Attributes: map[string]schema.Attribute{
 							"group_by": schema.ListAttribute{
-								Optional:    true,
-								Computed:    true,
-								ElementType: types.StringType,
+								Optional:      true,
+								Computed:      true,
+								ElementType:   types.StringType,
+								PlanModifiers: []planmodifier.List{listplanmodifier.UseStateForUnknown()},
 								Description: "Columns to group by before aggregating.\n\n" +
 									"On a `sql` multi-alert this can be left empty and the server fills it in " +
 									"from the query's own GROUP BY, so the value read back may differ from " +
-									"the empty list that was sent.",
+									"the empty list that was sent.\n\n" +
+									"Left unset on an existing alert, the server's list is kept across updates.",
 							},
 							"function": schema.StringAttribute{
 								Optional:    true,
@@ -573,9 +625,11 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 						Description: "Lookback window in minutes that each evaluation queries.",
 					},
 					"operator": schema.StringAttribute{
-						Optional: true,
-						Computed: true,
-						Description: "Operator comparing the result to `threshold`. Defaults to `>=`.\n\n" +
+						Optional:      true,
+						Computed:      true,
+						PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+						Description: "Operator comparing the result to `threshold`. Defaults to `>=` on a new alert; left " +
+							"unset on an existing one, the server's operator is kept across updates.\n\n" +
 							"Only the symbol operators are accepted here. A threshold compares a row count " +
 							"against a number, so `Contains` and the other word-shaped operators have no " +
 							"meaning; the server answers `HTTP 500: cannot convert contains into a trigger " +
@@ -585,9 +639,11 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 						Validators: []validator.String{stringvalidator.OneOf(thresholdOperators...)},
 					},
 					"threshold": schema.Int64Attribute{
-						Optional: true,
-						Computed: true,
-						Description: "Critical threshold the result is compared against. Defaults to `1`.\n\n" +
+						Optional:      true,
+						Computed:      true,
+						PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
+						Description: "Critical threshold the result is compared against. Defaults to `1` on a new alert; " +
+							"left unset on an existing one, the server's threshold is kept across updates.\n\n" +
 							"Leave unset on an SLO alert: that family has no count gate, and its threshold " +
 							"lives on `query_condition.slo_condition.critical`.",
 					},
@@ -804,6 +860,15 @@ func (r *AlertResource) ValidateConfig(ctx context.Context, req resource.Validat
 		}
 	}
 
+	if knownAndSet(config.NotifyOnRecovery) && config.NotifyOnRecovery.ValueBool() && config.IsRealTime.ValueBool() {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("notify_on_recovery"),
+			"Recovery notifications do not apply to a real-time alert",
+			"A real-time alert keeps no state between records, so it never recovers and the server rejects "+
+				"`notify_on_recovery = true` on one. Remove `notify_on_recovery`, or drop `is_real_time`.",
+		)
+	}
+
 	if config.TriggerCondition != nil &&
 		config.TriggerCondition.FrequencyType.ValueString() == "cron" &&
 		config.TriggerCondition.Cron.IsNull() && !config.TriggerCondition.Cron.IsUnknown() {
@@ -912,6 +977,16 @@ func (r *AlertResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	}
 	body.ID = alertID
 
+	var config AlertResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	r.keepUnmanagedSettings(ctx, org, alertID, &config, &body, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	if err := r.client.UpdateAlert(ctx, org, alertID, body); err != nil {
 		resp.Diagnostics.AddError("Error updating alert", err.Error())
 		return
@@ -930,11 +1005,187 @@ func (r *AlertResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	plan.AlertID = types.StringValue(alertID)
 	plan.ID = types.StringValue(alertResourceID(org, alertID))
 
+	planned := plannedUnsetValuesOf(&plan)
 	r.refresh(ctx, org, alertID, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	planned.restore(&config, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// plannedUnsetValues holds the planned values of the Optional+Computed
+// attributes an update keeps from the server when they are unset.
+//
+// Unset in the configuration, the plan carries the value last read, and the
+// write sends the server's current value, which differs only when it changed
+// after the plan was made. State keeps the planned value then, as Terraform
+// requires of a known planned value, and the next refresh reads the server's
+// without a diff, because the attribute is computed and unset.
+type plannedUnsetValues struct {
+	notifyOnRecovery types.Bool
+	destinations     types.Set
+	operator         types.String
+	threshold        types.Int64
+	groupBy          *types.List
+}
+
+func plannedUnsetValuesOf(plan *AlertResourceModel) plannedUnsetValues {
+	p := plannedUnsetValues{
+		notifyOnRecovery: plan.NotifyOnRecovery,
+		destinations:     plan.Destinations,
+		operator:         types.StringUnknown(),
+		threshold:        types.Int64Unknown(),
+	}
+	if plan.TriggerCondition != nil {
+		p.operator = plan.TriggerCondition.Operator
+		p.threshold = plan.TriggerCondition.Threshold
+	}
+	if plan.QueryCondition != nil && plan.QueryCondition.Aggregation != nil {
+		groupBy := plan.QueryCondition.Aggregation.GroupBy
+		p.groupBy = &groupBy
+	}
+	return p
+}
+
+func (p plannedUnsetValues) restore(config, model *AlertResourceModel) {
+	if config.NotifyOnRecovery.IsNull() && !p.notifyOnRecovery.IsUnknown() {
+		model.NotifyOnRecovery = p.notifyOnRecovery
+	}
+	if config.Destinations.IsNull() && !p.destinations.IsUnknown() {
+		model.Destinations = p.destinations
+	}
+	if config.TriggerCondition != nil && model.TriggerCondition != nil {
+		if config.TriggerCondition.Operator.IsNull() && !p.operator.IsUnknown() {
+			model.TriggerCondition.Operator = p.operator
+		}
+		if config.TriggerCondition.Threshold.IsNull() && !p.threshold.IsUnknown() {
+			model.TriggerCondition.Threshold = p.threshold
+		}
+	}
+	if p.groupBy != nil && !p.groupBy.IsUnknown() &&
+		config.QueryCondition != nil && config.QueryCondition.Aggregation != nil &&
+		config.QueryCondition.Aggregation.GroupBy.IsNull() &&
+		model.QueryCondition != nil && model.QueryCondition.Aggregation != nil {
+		model.QueryCondition.Aggregation.GroupBy = *p.groupBy
+	}
+}
+
+// keepUnmanagedSettings fills in what an update sends for the settings the
+// configuration does not decide.
+//
+// The update endpoint replaces the whole alert, so any field the body leaves
+// out is reset. A configured notify_on_recovery is sent as written. An unset
+// one, and the settings that have no attribute (recovery_destinations,
+// keep_firing_for, suppress_repeats, runbook_url, oncall_team,
+// incident_title_template, promql_rule_mode), are read from the server just
+// before the write, and so are the Optional+Computed attributes left unset
+// (see keepServerComputed). State is not used for this: it may be stale (a plan made
+// with -refresh=false) or written by a release that did not know the
+// attribute.
+//
+// A real-time alert can carry none of these, and the server rejects an alert
+// that does. The settings without an attribute are dropped for one, because
+// the configuration has no way to clear them. notify_on_recovery is never
+// dropped silently: when the server holds true and the configuration does not
+// say, the update stops and asks for an explicit `false`.
+func (r *AlertResource) keepUnmanagedSettings(ctx context.Context, org, alertID string, config *AlertResourceModel, body *AlertAPI, diags *diag.Diagnostics) {
+	current, err := r.client.GetAlert(ctx, org, alertID)
+	if err != nil {
+		diags.AddError("Error reading alert before update",
+			"The update replaces the whole alert, so the provider reads the settings it does not manage, "+
+				"to send them back, and that read failed: "+err.Error())
+		return
+	}
+	if current == nil {
+		current = &AlertAPI{}
+	}
+	keepServerComputed(config, current, body)
+
+	body.RunbookURL = current.RunbookURL
+	body.OncallTeam = current.OncallTeam
+	body.IncidentTitleTemplate = current.IncidentTitleTemplate
+	// Rule mode only means something on a PromQL alert, and the server ignores
+	// it on any other, so it is kept only while the alert stays PromQL.
+	if body.QueryCondition.QueryType == "promql" && current.QueryCondition.QueryType == "promql" {
+		body.QueryCondition.PromQLRuleMode = current.QueryCondition.PromQLRuleMode
+	}
+
+	configured := config.NotifyOnRecovery
+	notify := current.NotifyOnRecovery != nil && *current.NotifyOnRecovery
+	if !configured.IsNull() && !configured.IsUnknown() {
+		notify = configured.ValueBool()
+	} else if notify && body.IsRealTime {
+		diags.AddAttributeError(
+			path.Root("notify_on_recovery"),
+			"Recovery notifications are on for this alert",
+			"The alert has notify_on_recovery switched on, which a real-time alert cannot have. The provider "+
+				"does not turn it off unasked: set `notify_on_recovery = false` to make this a real-time alert.",
+		)
+		return
+	}
+	body.NotifyOnRecovery = &notify
+
+	if body.IsRealTime {
+		return
+	}
+	body.KeepFiringFor = current.KeepFiringFor
+	body.SuppressRepeats = current.SuppressRepeats
+	// The server refuses recovery destinations without the switch, so turning
+	// recovery off in the configuration drops them along with it.
+	if notify {
+		body.RecoveryDestinations = current.RecoveryDestinations
+	}
+}
+
+// keepServerComputed sends the server's value for the Optional+Computed
+// attributes the configuration leaves unset: destinations, the trigger's
+// operator and threshold, and the aggregation's group_by. Sending what the plan
+// holds instead would send nothing for a value that is unknown, which clears
+// it, or a stale value from state.
+//
+// The trigger defaults depend on the alert family: an SLO alert has no count
+// gate, and the server rejects a non-default one. When the family changes, the
+// server's operator and threshold belong to the old family, so the new
+// family's defaults are sent instead.
+func keepServerComputed(config *AlertResourceModel, current, body *AlertAPI) {
+	if config.Destinations.IsNull() {
+		body.Destinations = current.Destinations
+		if body.Destinations == nil {
+			body.Destinations = []string{}
+		}
+	}
+
+	if config.TriggerCondition != nil {
+		isSlo := body.QueryCondition.QueryType == "slo"
+		sameFamily := isSlo == (current.QueryCondition.QueryType == "slo")
+		if config.TriggerCondition.Operator.IsNull() {
+			switch {
+			case sameFamily && current.TriggerCondition.Operator != "":
+				body.TriggerCondition.Operator = current.TriggerCondition.Operator
+			case isSlo:
+				body.TriggerCondition.Operator = "="
+			default:
+				body.TriggerCondition.Operator = ">="
+			}
+		}
+		if config.TriggerCondition.Threshold.IsNull() {
+			switch {
+			case sameFamily && current.TriggerCondition.Operator != "":
+				body.TriggerCondition.Threshold = current.TriggerCondition.Threshold
+			case isSlo:
+				body.TriggerCondition.Threshold = 0
+			default:
+				body.TriggerCondition.Threshold = 1
+			}
+		}
+	}
+
+	if config.QueryCondition != nil && config.QueryCondition.Aggregation != nil &&
+		config.QueryCondition.Aggregation.GroupBy.IsNull() &&
+		body.QueryCondition.Aggregation != nil && current.QueryCondition.Aggregation != nil {
+		body.QueryCondition.Aggregation.GroupBy = current.QueryCondition.Aggregation.GroupBy
+	}
 }
 
 func (r *AlertResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -1018,6 +1269,7 @@ func (r *AlertResource) alertFromModel(ctx context.Context, model *AlertResource
 		Owner:            optString(model.Owner),
 		Priority:         optInt64(model.Priority),
 		PendingPeriodSec: model.PendingPeriodSec.ValueInt64(),
+		NotifyOnRecovery: optBool(model.NotifyOnRecovery),
 		Tags:             stringsFromSet(ctx, model.Tags, diags),
 	}
 	if folderID != "" {
@@ -1379,6 +1631,7 @@ func (r *AlertResource) applyAlertToModel(ctx context.Context, alert *AlertAPI, 
 	}
 	model.TZOffset = types.Int64Value(int64(alert.TZOffset))
 	model.PendingPeriodSec = types.Int64Value(alert.PendingPeriodSec)
+	model.NotifyOnRecovery = types.BoolValue(alert.NotifyOnRecovery != nil && *alert.NotifyOnRecovery)
 	model.Template = stringFromPtr(alert.Template)
 	model.Owner = stringFromPtr(alert.Owner)
 	model.Priority = int64FromPtr(alert.Priority)
