@@ -227,10 +227,6 @@ func TestAlertUpdateKeepsServerNotifyOnRecoveryWhenUnset(t *testing.T) {
 		"refreshed state": {types.BoolValue(true), types.BoolValue(true)},
 		// State written by 1.4.3, which had no such attribute.
 		"state from an older release": {types.BoolUnknown(), types.BoolNull()},
-		// A plan made with -refresh=false after the flag was switched on. The
-		// plan says false, so Terraform reports an inconsistent result after
-		// this apply; what matters here is that the server keeps true.
-		"stale state": {types.BoolValue(false), types.BoolValue(false)},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -258,6 +254,28 @@ func TestAlertUpdateKeepsServerNotifyOnRecoveryWhenUnset(t *testing.T) {
 			assertRecoverySettingsKept(t, fake.lastPut, true)
 		})
 	}
+}
+
+// The server's value can change between plan and apply: switched on in the UI
+// after the plan, or a plan made with -refresh=false. The update must still
+// send the server's value, and state must hold the planned value, because
+// Terraform fails an apply whose result differs from a known planned value.
+func TestAlertUpdateServerFlipBetweenPlanAndApply(t *testing.T) {
+	t.Parallel()
+	fake, got, resp := runAlertUpdate(t, types.BoolValue(false), types.BoolValue(false), types.BoolNull(), false)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("update: %+v", resp.Diagnostics)
+	}
+	if fake.lastPut["notify_on_recovery"] != true {
+		t.Errorf("PUT notify_on_recovery: got %v, want the server's true", fake.lastPut["notify_on_recovery"])
+	}
+	if fake.get(testAlertPath)["notify_on_recovery"] != true {
+		t.Error("server lost notify_on_recovery across the update")
+	}
+	if !got.NotifyOnRecovery.Equal(types.BoolValue(false)) {
+		t.Errorf("state notify_on_recovery: got %v, want the planned false", got.NotifyOnRecovery)
+	}
+	assertRecoverySettingsKept(t, fake.lastPut, true)
 }
 
 func assertRecoverySettingsKept(t *testing.T, put map[string]any, wantDestinations bool) {
@@ -551,6 +569,21 @@ func TestAlertDestinationUpdateKeepsServerMetadataWhenUnset(t *testing.T) {
 				t.Errorf("state metadata: got %v, want %v", got.Metadata, server)
 			}
 		})
+	}
+}
+
+// The same race for metadata: the server's map changed after the plan. The
+// update sends the server's map and state holds the planned one.
+func TestAlertDestinationUpdateServerFlipBetweenPlanAndApply(t *testing.T) {
+	t.Parallel()
+	planned := stringMap(map[string]string{"purpose": "old"})
+	fake, got := runDestinationUpdate(t, planned, planned, types.MapNull(types.StringType))
+	sent, _ := fake.lastPut["metadata"].(map[string]any)
+	if sent["purpose"] != "k8s" || sent["render_format"] != "slack" || len(sent) != 2 {
+		t.Errorf("PUT metadata: got %v, want the server's map", fake.lastPut["metadata"])
+	}
+	if !got.Metadata.Equal(planned) {
+		t.Errorf("state metadata: got %v, want the planned %v", got.Metadata, planned)
 	}
 }
 

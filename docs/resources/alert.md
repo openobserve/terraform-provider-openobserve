@@ -215,7 +215,7 @@ resource "openobserve_alert" "burning_fast" {
 
 Leave it unset to keep whatever the server holds: the provider reads the current value and sends it back on every update, so a flag switched on in the UI or through the API is never turned off by an unrelated change. Set it to manage the flag, and a change made elsewhere then shows as drift. A new alert created without it takes the server default, `false`. Removing the attribute from a configuration that set it stops managing it and leaves the server value as it is.
 
-The value is read again at apply time, so if it changed on the server after the plan was made (or the plan used `-refresh=false`), the server value is still kept, and Terraform reports an inconsistent result for this attribute; the next plan is clean.
+The value is read again at apply time, so if it changed on the server after the plan was made (or the plan used `-refresh=false`), the update still sends the server's value. State records the planned value for that apply and picks up the server's on the next refresh, with no diff.
 
 The recovery settings this resource does not expose yet, `recovery_destinations`, `keep_firing_for` and `suppress_repeats`, are carried over from the server on every update too, with two exceptions the server forces: `recovery_destinations` is dropped when `notify_on_recovery` is `false`, and all three are dropped on a real-time alert.
 

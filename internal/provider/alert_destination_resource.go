@@ -149,9 +149,9 @@ func (r *AlertDestinationResource) Schema(_ context.Context, _ resource.SchemaRe
 					"unrelated change. Set it to manage the whole map, and keys added elsewhere then show as " +
 					"drift. Set it to `{}` to clear it. Removing the attribute from a configuration that set it " +
 					"stops managing it and leaves the server's map as it is. The map is read again at apply " +
-					"time, so if it changed on the server after the plan was made, the server's map is still " +
-					"kept, and Terraform reports an inconsistent result for this attribute; the next plan is " +
-					"clean.\n\n" +
+					"time, so if it changed on the server after the plan was made, the update still sends the " +
+					"server's map. State records the planned map for that apply and picks up the server's on " +
+					"the next refresh, with no diff.\n\n" +
 					"Only webhook destinations store metadata, so a non-empty map is rejected with `type` `email` " +
 					"or `sns`.\n\n" +
 					"Marked sensitive, unlike on `openobserve_pipeline_destination`, because the server keeps some " +
@@ -310,10 +310,12 @@ func (r *AlertDestinationResource) Update(ctx context.Context, req resource.Upda
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		// A `{}` carried over from state, after the attribute was removed from
-		// the configuration, stays `{}` when the server holds nothing.
-		keptEmpty := !plan.Metadata.IsNull() && !plan.Metadata.IsUnknown() && len(plan.Metadata.Elements()) == 0
-		if len(body.Metadata) != 0 || !keptEmpty {
+		// The plan carries the map last read, and state keeps it, as Terraform
+		// requires, even when the server's map changed after the plan was made;
+		// the next refresh reads that without a diff, because the attribute is
+		// computed and unset. Only state from a release without the attribute
+		// plans it unknown, and then state takes what was sent.
+		if plan.Metadata.IsUnknown() {
 			plan.Metadata = mapFromStrings(ctx, body.Metadata, &resp.Diagnostics)
 		}
 	}

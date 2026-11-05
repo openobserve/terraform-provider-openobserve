@@ -376,8 +376,9 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"`false`. Removing the attribute from a configuration that set it stops managing it and " +
 					"leaves the server value as it is.\n\n" +
 					"The value is read again at apply time, so if it changed on the server after the plan was " +
-					"made (or the plan used `-refresh=false`), the server value is still kept, and Terraform " +
-					"reports an inconsistent result for this attribute; the next plan is clean.\n\n" +
+					"made (or the plan used `-refresh=false`), the update still sends the server's value. State " +
+					"records the planned value for that apply and picks up the server's on the next refresh, " +
+					"with no diff.\n\n" +
 					"The recovery settings this resource does not expose yet, `recovery_destinations`, " +
 					"`keep_firing_for` and `suppress_repeats`, are carried over from the server on every update " +
 					"too, with two exceptions the server forces: `recovery_destinations` is dropped when " +
@@ -979,9 +980,18 @@ func (r *AlertResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	plan.AlertID = types.StringValue(alertID)
 	plan.ID = types.StringValue(alertResourceID(org, alertID))
 
+	// Unset in the configuration, the plan carries the value last read. The
+	// write above sent the server's current value, which differs only when it
+	// changed after the plan was made. State keeps the planned value then, as
+	// Terraform requires, and the next refresh reads the server's without a
+	// diff, because the attribute is computed and unset.
+	planned := plan.NotifyOnRecovery
 	r.refresh(ctx, org, alertID, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
+	}
+	if configuredRecovery.IsNull() && !planned.IsUnknown() {
+		plan.NotifyOnRecovery = planned
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
