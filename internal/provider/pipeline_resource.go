@@ -507,6 +507,9 @@ func (r *PipelineResource) Update(ctx context.Context, req resource.UpdateReques
 
 	body := r.apiFromModel(&plan, org)
 	body.ID = pipelineID
+	// The server rejects an update whose version differs from the stored one,
+	// and bumps it on every accepted update.
+	body.Version = state.Version.ValueInt64()
 	if err := r.client.UpdatePipeline(ctx, org, body); err != nil {
 		resp.Diagnostics.AddError("Error updating pipeline", pipelineErrorDetail(err))
 		return

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Every `openobserve_pipeline` update after the first failed with HTTP 409**
+  ([#6](https://github.com/openobserve/terraform-provider-openobserve/issues/6)).
+  The update did not send the pipeline's version, which OpenObserve checks
+  before accepting a change and bumps after each one:
+
+  ```
+  OpenObserve API error (HTTP 409): {"code":409,"message":"Pipeline with ID ... modified by someone else. Please refresh."}
+  ```
+
+  The update now sends the version recorded in state.
+
 ## [1.4.2] - 2026-10-01
 
 ### Fixed
