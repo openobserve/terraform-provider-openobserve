@@ -323,6 +323,48 @@ data "openobserve_composite_alert_references" "error_rate" {
 `ZO_ALERT_COMPOSITE_WRITES_ENABLED=false`, and composites are unavailable
 entirely on super-cluster deployments. Both surface as a clear error on apply.
 
+## Anomaly alerts
+
+An anomaly alert needs no threshold. `openobserve_anomaly_alert` trains on at
+least 21 days of a stream's history and then flags each `histogram_interval`
+bucket whose value leaves the band `expected ± k·σ`. It is a separate resource
+because OpenObserve stores it as an anomaly detection config, not as a v2 alert.
+It requires **OpenObserve Enterprise v1.1.0 or later**.
+
+`histogram_interval` must divide OpenObserve's bucketing origin,
+2001-01-01T00:00:00Z, so that every run buckets on the same grid. `5m`, `15m`,
+`1h`, `6h` and `1d` qualify; `7m`, `11m`, `5h` and `2d` do not, and are rejected
+at plan time.
+
+```hcl
+resource "openobserve_anomaly_alert" "checkout_volume" {
+  name        = "checkout_volume"
+  stream_name = "app_logs"
+  filters     = [{ field = "service", operator = "=", value = "checkout" }]
+
+  detection_function       = "count"
+  histogram_interval       = "5m"
+  schedule_interval        = "15m"
+  detection_window_seconds = 3600
+
+  alert_direction          = "above" # deliver rises only
+  alert_window_buckets     = 4       # fire when 3 of the last 4 buckets
+  alert_window_fire_pct    = 75      # are out of band, and recover when
+  alert_window_recover_pct = 50      # fewer than half of them are
+
+  alert_destinations = [openobserve_alert_destination.slack.name]
+}
+```
+
+k comes from training (between 3 and 6, reported as `band_k`) unless you set
+`band_width` to fix it, or `alert_budget_per_day` to let OpenObserve move it to
+hold a daily number of alerts (`band_k` then reports the moved k, which can
+leave that range). The two cannot be combined, which is caught at
+plan time. Changing the band and window settings takes effect on the next run
+without retraining. `band_grouping`, `band_k` and the training span are filled
+by training, so they are null right after the first apply; a later refresh
+picks them up.
+
 ## Scheduling
 
 By default an alert runs every `frequency` minutes over a `period`-minute
@@ -659,5 +701,101 @@ resource "openobserve_composite_alert" "checkout_unhealthy" {
   destinations = [openobserve_alert_destination.slack.name]
 
   expression = "{${openobserve_composite_alert.bad_deploy.alert_id}} || {${openobserve_composite_alert.unmitigated_errors.alert_id}}"
+}
+```
+
+### Anomaly alerts
+
+```terraform
+# Anomaly alerts need OpenObserve Enterprise v1.1.0 or later.
+# They live in alert folders, like every other kind of alert.
+resource "openobserve_folder" "anomalies" {
+  folder_type = "alerts"
+  name        = "Anomalies"
+}
+
+# Request volume per 5-minute bucket for one service. The band width is left
+# unset (Auto), so training picks k, between 3 and 6, from the data.
+resource "openobserve_anomaly_alert" "checkout_volume" {
+  folder_id   = openobserve_folder.anomalies.folder_id
+  name        = "checkout_volume"
+  description = "Unusual checkout request volume"
+  stream_name = "app_logs"
+
+  filters = [
+    { field = "service", operator = "=", value = "checkout" },
+  ]
+  detection_function       = "count"
+  histogram_interval       = "5m"
+  schedule_interval        = "15m"
+  detection_window_seconds = 3600
+
+  alert_destinations = [openobserve_alert_destination.slack.name]
+}
+
+# p95 latency per 5-minute bucket, with a fixed band and delivery settings:
+# only a rise is delivered, and only once 3 of the last 4 buckets are out of
+# band. It recovers when fewer than half of them are.
+resource "openobserve_anomaly_alert" "checkout_latency" {
+  folder_id   = openobserve_folder.anomalies.folder_id
+  name        = "checkout_latency"
+  stream_name = "app_logs"
+
+  filters = [
+    { field = "service", operator = "=", value = "checkout" },
+  ]
+  detection_function       = "p95"
+  detection_function_field = "duration_ms"
+  histogram_interval       = "5m"
+  schedule_interval        = "15m"
+  detection_window_seconds = 3600
+  training_window_days     = 28
+
+  band_width               = 4 # expected ± 4σ
+  alert_direction          = "above"
+  alert_window_buckets     = 4
+  alert_window_fire_pct    = 75
+  alert_window_recover_pct = 50
+
+  alert_destinations = [openobserve_alert_destination.slack.name]
+  priority           = 2
+  tags               = ["prod", "team:checkout"]
+}
+
+# An error rate from custom SQL. The query computes the value of each bucket
+# itself; detection_function_field names the output column that carries it.
+# Let OpenObserve move k to deliver about two alerts a day instead of fixing
+# it. alert_budget_per_day cannot be combined with band_width.
+resource "openobserve_anomaly_alert" "error_rate" {
+  folder_id   = openobserve_folder.anomalies.folder_id
+  name        = "checkout_error_rate"
+  stream_name = "app_logs"
+
+  custom_sql = <<-SQL
+    SELECT histogram(_timestamp, '1h') AS _timestamp,
+           CAST(SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS DOUBLE) / COUNT(*) AS value
+    FROM "app_logs"
+    WHERE service = 'checkout'
+    GROUP BY _timestamp
+  SQL
+
+  detection_function       = "avg"
+  detection_function_field = "value"
+  histogram_interval       = "1h"
+  schedule_interval        = "1h"
+  detection_window_seconds = 7200
+
+  alert_budget_per_day = 2
+
+  alert_destinations = [openobserve_alert_destination.slack.name]
+}
+
+# Filled in once training has run; refresh to see them.
+output "checkout_volume_band" {
+  value = {
+    grouping = openobserve_anomaly_alert.checkout_volume.band_grouping
+    k        = openobserve_anomaly_alert.checkout_volume.band_k
+    status   = openobserve_anomaly_alert.checkout_volume.status
+  }
 }
 ```

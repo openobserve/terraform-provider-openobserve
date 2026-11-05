@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -1846,4 +1847,249 @@ func conditionOperatorOf(t *testing.T, raw json.RawMessage) string {
 		t.Fatalf("conditions.or[0].operator = %v, want a string", entry["operator"])
 	}
 	return op
+}
+
+// anomalyIntegrationPrefix names the objects the anomaly tests create.
+// OPENOBSERVE_TEST_PREFIX overrides it for servers that only allow a prefix.
+func anomalyIntegrationPrefix() string {
+	if p := os.Getenv("OPENOBSERVE_TEST_PREFIX"); p != "" {
+		return p
+	}
+	return "tf_it"
+}
+
+// anomalyIntegrationBody is a disabled count over the whole stream, so the
+// lifecycle never trains or notifies anything.
+func anomalyIntegrationBody(name, stream string) AnomalyConfigWriteAPI {
+	direction := "above"
+	buckets := int64(3)
+	fire, recoverPct, bandWidth := 60.0, 40.0, 4.0
+	empty := []AnomalyFilterAPI{}
+	return AnomalyConfigWriteAPI{
+		Name:                   name,
+		Description:            "integration test",
+		StreamName:             stream,
+		StreamType:             "logs",
+		QueryMode:              "filters",
+		Filters:                &empty,
+		DetectionFunction:      "count",
+		HistogramInterval:      "1h",
+		ScheduleInterval:       "1h",
+		DetectionWindowSeconds: 7200,
+		TrainingWindowDays:     28,
+		RetrainIntervalDays:    7,
+		BandWidth:              &bandWidth,
+		AlertDirection:         &direction,
+		AlertWindowBuckets:     &buckets,
+		AlertWindowFirePct:     &fire,
+		AlertWindowRecoverPct:  &recoverPct,
+		AlertEnabled:           false,
+		AlertDestinations:      []string{},
+		Enabled:                false,
+		FolderID:               "default",
+		Tags:                   []string{},
+	}
+}
+
+// anomalyIntegrationStream is the stream the anomaly tests read:
+// OPENOBSERVE_ANOMALY_STREAM when set, which must hold at least 21 days of logs
+// for the training test, or else a fresh empty stream.
+func anomalyIntegrationStream(t *testing.T, c *Client) string {
+	t.Helper()
+	if s := os.Getenv("OPENOBSERVE_ANOMALY_STREAM"); s != "" {
+		return s
+	}
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+	name := uniqueName(anomalyIntegrationPrefix() + "_anomaly_stream")
+	if err := c.CreateStream(ctx, org, "logs", name, CreateStreamAPI{}); err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteStream(ctx, org, "logs", name) })
+	return name
+}
+
+// requireAnomalyAPI skips on a server without anomaly detection (open source).
+func requireAnomalyAPI(t *testing.T, c *Client) {
+	t.Helper()
+	if _, err := c.ListAnomalyConfigs(context.Background(), c.DefaultOrgID()); err != nil {
+		if errors.Is(err, errAnomalyUnsupported) {
+			t.Skip("anomaly detection needs OpenObserve Enterprise; this server has no anomaly_detection API")
+		}
+		t.Fatalf("ListAnomalyConfigs: %v", err)
+	}
+}
+
+func TestIntegrationAnomalyAlertLifecycle(t *testing.T) {
+	c := integrationClient(t)
+	requireAnomalyAPI(t, c)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+	stream := anomalyIntegrationStream(t, c)
+	name := uniqueName(anomalyIntegrationPrefix() + "_anomaly")
+
+	body := anomalyIntegrationBody(name, stream)
+	id, err := c.CreateAnomalyConfig(ctx, org, body)
+	if err != nil {
+		t.Fatalf("CreateAnomalyConfig: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := c.DeleteAnomalyConfig(ctx, org, id); err != nil {
+			t.Errorf("DeleteAnomalyConfig: %v", err)
+		}
+	})
+
+	got, err := c.GetAnomalyConfig(ctx, org, id)
+	if err != nil || got == nil {
+		t.Fatalf("GetAnomalyConfig = %+v, %v", got, err)
+	}
+	if !got.HasBandSettings {
+		t.Fatalf("server is older than the band settings (needs v%s)", anomalyMinVersion)
+	}
+	if got.BandWidth == nil || *got.BandWidth != 4 ||
+		got.AlertDirection == nil || *got.AlertDirection != "above" ||
+		got.AlertWindowBuckets == nil || *got.AlertWindowBuckets != 3 ||
+		got.AlertWindowFirePct == nil || *got.AlertWindowFirePct != 60 ||
+		got.AlertWindowRecoverPct == nil || *got.AlertWindowRecoverPct != 40 {
+		t.Errorf("band settings round-tripped as %+v", got)
+	}
+	if fn, field := splitDetectionFunction(got.DetectionFunction); fn != "count" || field != nil {
+		t.Errorf("detection_function read back as %q", got.DetectionFunction)
+	}
+	if got.TrainingWindowDays != 28 {
+		t.Errorf("training_window_days = %d, want 28", got.TrainingWindowDays)
+	}
+
+	// The server rejects band_width beside a budget; the provider catches the
+	// same rule at plan time.
+	both := body
+	budget := 5.0
+	both.AlertBudgetPerDay = &budget
+	if err := c.UpdateAnomalyConfig(ctx, org, id, both); err == nil {
+		t.Error("an update setting band_width and alert_budget_per_day together was accepted")
+	} else if !strings.Contains(err.Error(), "band_width") {
+		t.Errorf("conflict error does not name band_width: %v", err)
+	}
+
+	// Switching to a budget needs band_width sent as an explicit null, and the
+	// other settings sent as null go back to their defaults.
+	switched := body
+	switched.AlertBudgetPerDay = &budget
+	switched.BandWidth = nil
+	switched.AlertDirection = nil
+	switched.AlertWindowBuckets = nil
+	switched.AlertWindowFirePct = nil
+	switched.AlertWindowRecoverPct = nil
+	if err := c.UpdateAnomalyConfig(ctx, org, id, switched); err != nil {
+		t.Fatalf("UpdateAnomalyConfig to a budget: %v", err)
+	}
+	got, err = c.GetAnomalyConfig(ctx, org, id)
+	if err != nil || got == nil {
+		t.Fatalf("GetAnomalyConfig after update = %+v, %v", got, err)
+	}
+	if got.BandWidth != nil || got.AlertDirection != nil || got.AlertWindowBuckets != nil ||
+		got.AlertWindowFirePct != nil || got.AlertWindowRecoverPct != nil {
+		t.Errorf("settings sent as null were not cleared: %+v", got)
+	}
+	if got.AlertBudgetPerDay == nil || *got.AlertBudgetPerDay != 5 {
+		t.Errorf("alert_budget_per_day = %v, want 5", got.AlertBudgetPerDay)
+	}
+
+	if err := c.DeleteAnomalyConfig(ctx, org, id); err != nil {
+		t.Fatalf("DeleteAnomalyConfig: %v", err)
+	}
+	if gone, err := c.GetAnomalyConfig(ctx, org, id); err != nil || gone != nil {
+		t.Errorf("config still readable after delete: %+v, %v", gone, err)
+	}
+}
+
+// anomalyTrainingWait returns how long a training test may wait: at most limit,
+// and never so long that the test binary's -timeout kills the process before
+// t.Cleanup has deleted the config. It skips when too little time is left.
+func anomalyTrainingWait(t *testing.T, limit time.Duration) time.Time {
+	t.Helper()
+	// Room for the delete, its RBAC fallback and a disable, each of which can
+	// take up to the client's 60-second request timeout in the worst case.
+	const cleanupMargin = 3 * time.Minute
+	deadline := time.Now().Add(limit)
+	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-cleanupMargin).Before(deadline) {
+		deadline = testDeadline.Add(-cleanupMargin)
+	}
+	if time.Until(deadline) < time.Minute {
+		t.Skip("too little of the test timeout is left to wait for training; run with -timeout 20m")
+	}
+	return deadline
+}
+
+// TestIntegrationAnomalyAlertTraining trains a config and checks the computed
+// band attributes are filled. Training reads at least 21 days of history and
+// takes a while, so the test runs only with OPENOBSERVE_ANOMALY_TRAINING=1 and
+// OPENOBSERVE_ANOMALY_STREAM naming a logs stream that has that history:
+//
+//	OPENOBSERVE_ANOMALY_TRAINING=1 OPENOBSERVE_ANOMALY_STREAM=app_logs \
+//	  go test ./internal/provider/ -run TestIntegrationAnomalyAlertTraining -v -timeout 20m
+func TestIntegrationAnomalyAlertTraining(t *testing.T) {
+	c := integrationClient(t)
+	if os.Getenv("OPENOBSERVE_ANOMALY_TRAINING") != "1" || os.Getenv("OPENOBSERVE_ANOMALY_STREAM") == "" {
+		t.Skip("set OPENOBSERVE_ANOMALY_TRAINING=1 and OPENOBSERVE_ANOMALY_STREAM to a logs stream with 21+ days " +
+			"of data to run the training test")
+	}
+	requireAnomalyAPI(t, c)
+	deadline := anomalyTrainingWait(t, 10*time.Minute)
+	ctx := context.Background()
+	org := c.DefaultOrgID()
+	name := uniqueName(anomalyIntegrationPrefix() + "_anomaly_train")
+
+	body := anomalyIntegrationBody(name, os.Getenv("OPENOBSERVE_ANOMALY_STREAM"))
+	body.BandWidth = nil
+	body.Enabled = true // creating an enabled config starts training
+	id, err := c.CreateAnomalyConfig(ctx, org, body)
+	if err != nil {
+		t.Fatalf("CreateAnomalyConfig: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := c.DeleteAnomalyConfig(ctx, org, id); err != nil {
+			t.Errorf("DeleteAnomalyConfig: %v", err)
+			// Never leave an enabled config running on the server.
+			disabled := body
+			disabled.Enabled = false
+			disabled.StreamName, disabled.StreamType = "", ""
+			if err := c.UpdateAnomalyConfig(ctx, org, id, disabled); err != nil {
+				t.Errorf("disabling anomaly config %s that could not be deleted: %v", id, err)
+			}
+		}
+	})
+
+	// Every poll is bounded by the wait deadline, so a hung request cannot
+	// eat into the margin the cleanup needs.
+	pollCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	var got *AnomalyConfigAPI
+	for {
+		got, err = c.GetAnomalyConfig(pollCtx, org, id)
+		if err != nil || got == nil {
+			t.Fatalf("GetAnomalyConfig = %+v, %v", got, err)
+		}
+		if got.IsTrained && got.Status == "ready" {
+			break
+		}
+		if got.Status == "failed" {
+			t.Fatalf("training failed: %v", stringFromPtr(got.LastError))
+		}
+		if time.Until(deadline) < 15*time.Second {
+			t.Fatalf("not trained in the time the test timeout allows: status %q", got.Status)
+		}
+		time.Sleep(15 * time.Second)
+	}
+
+	if got.BandGrouping == nil || *got.BandGrouping == "" {
+		t.Error("band_grouping is empty after training")
+	}
+	if got.BandK == nil || *got.BandK < 3 || *got.BandK > 6 {
+		t.Errorf("band_k = %v, want a trained k between 3 and 6", got.BandK)
+	}
+	if got.TrainingDataStartUs == nil || got.TrainingDataEndUs == nil ||
+		*got.TrainingDataStartUs >= *got.TrainingDataEndUs {
+		t.Errorf("training span = %v .. %v", got.TrainingDataStartUs, got.TrainingDataEndUs)
+	}
 }

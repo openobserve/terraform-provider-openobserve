@@ -120,6 +120,7 @@ func (p *OpenObserveProvider) Resources(_ context.Context) []func() resource.Res
 		NewAlertResource,
 		NewCompositeAlertResource,
 		NewSloResource,
+		NewAnomalyAlertResource,
 		NewFunctionResource,
 		NewPipelineDestinationResource,
 		NewPipelineResource,
