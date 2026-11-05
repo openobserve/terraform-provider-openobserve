@@ -331,6 +331,11 @@ bucket whose value leaves the band `expected ± k·σ`. It is a separate resourc
 because OpenObserve stores it as an anomaly detection config, not as a v2 alert.
 It requires **OpenObserve Enterprise v1.1.0 or later**.
 
+`histogram_interval` must divide OpenObserve's bucketing origin,
+2001-01-01T00:00:00Z, so that every run buckets on the same grid. `5m`, `15m`,
+`1h`, `6h` and `1d` qualify; `7m`, `11m`, `5h` and `2d` do not, and are rejected
+at plan time.
+
 ```hcl
 resource "openobserve_anomaly_alert" "checkout_volume" {
   name        = "checkout_volume"

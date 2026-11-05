@@ -193,6 +193,12 @@ func anomalyErrorDiag(action string, err error) (string, string) {
 			"OpenObserve answered 403 \"Anomaly detection is disabled\". The server was started with " +
 				"O2_ANOMALY_DETECTION_DISABLED=true, which turns every anomaly detection endpoint off."
 	}
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
+		return "Error " + action + " anomaly alert: unauthorized",
+			"OpenObserve answered 401 Unauthorized. Either the provider's credentials are wrong, or the " +
+				"organization in `org_id` does not exist or the user is not a member of it: OpenObserve answers " +
+				"an organization the user cannot see the same way as bad credentials.\n\n" + err.Error()
+	}
 	return "Error " + action + " anomaly alert", err.Error()
 }
 
@@ -302,11 +308,17 @@ func (c *Client) ListAnomalyConfigs(ctx context.Context, orgID string) ([]Anomal
 // AnomalyBandSettingsSupported reports whether the server stores the band
 // settings, judged from the configs it already lists: a server older than
 // them leaves their columns out. known is false when the organization has no
-// config to judge by.
+// config to judge by, or when the caller may create alerts but not list them
+// (403); the read-back after create then decides.
 func (c *Client) AnomalyBandSettingsSupported(ctx context.Context, orgID string) (known, supported bool, err error) {
 	path := fmt.Sprintf("/api/%s/anomaly_detection", pathEscape(orgID))
 	var rows []map[string]json.RawMessage
 	if err := c.doJSON(ctx, http.MethodGet, path, nil, &rows); err != nil {
+		var apiErr *apiError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden &&
+			!strings.Contains(apiErr.Body, "Anomaly detection is disabled") {
+			return false, false, nil
+		}
 		return false, false, c.unsupportedOr(ctx, err)
 	}
 	if len(rows) == 0 {

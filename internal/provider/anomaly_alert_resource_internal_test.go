@@ -715,3 +715,114 @@ func TestKeepPlannedTrainingFields(t *testing.T) {
 		t.Errorf("an unknown planned value was not filled from the server: %v", got.TrainingDataEndUs)
 	}
 }
+
+// int64AttrDiags runs the schema validators of one integer attribute.
+func int64AttrDiags(t *testing.T, name string, value int64) diag.Diagnostics {
+	t.Helper()
+	attribute, ok := anomalySchema(t).Attributes[name].(schema.Int64Attribute)
+	if !ok {
+		t.Fatalf("%s is not an integer attribute", name)
+	}
+	req := validator.Int64Request{Path: path.Root(name), ConfigValue: types.Int64Value(value)}
+	var diags diag.Diagnostics
+	for _, v := range attribute.Validators {
+		resp := &validator.Int64Response{}
+		v.ValidateInt64(context.Background(), req, resp)
+		diags.Append(resp.Diagnostics...)
+	}
+	return diags
+}
+
+// TestAnomalyInt32Bounds checks the fields the server stores as 32-bit
+// integers reject values that would not fit, at plan time.
+func TestAnomalyInt32Bounds(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"training_window_days", "alert_window_buckets", "retrain_interval_days"} {
+		if diags := int64AttrDiags(t, name, 1<<31); !diags.HasError() {
+			t.Errorf("%s = 2^31 was accepted", name)
+		}
+		if diags := int64AttrDiags(t, name, 7); diags.HasError() {
+			t.Errorf("%s = 7 was rejected: %s", name, diagSummaries(diags))
+		}
+	}
+}
+
+func TestHistogramOriginValidator(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		value string
+		ok    bool
+	}{
+		{"30s", true}, {"1m", true}, {"5m", true}, {"90m", true}, {"1h", true}, {"6h", true}, {"1d", true},
+		{"7m", false}, {"11m", false}, {"5h", false}, {"7h", false}, {"10h", false}, {"2d", false},
+		{"bogus", true}, // left to the grammar validator
+	} {
+		req := validator.StringRequest{Path: path.Root("histogram_interval"), ConfigValue: types.StringValue(tc.value)}
+		resp := &validator.StringResponse{}
+		histogramOriginValidator{}.ValidateString(context.Background(), req, resp)
+		if resp.Diagnostics.HasError() == tc.ok {
+			t.Errorf("histogram_interval %q: ok = %v, want %v", tc.value, !resp.Diagnostics.HasError(), tc.ok)
+		}
+	}
+}
+
+// TestAnomalyLegacyEmptyObjectFilters reads a row written before the server
+// normalized filters, which can hold `{}` for "no filters".
+func TestAnomalyLegacyEmptyObjectFilters(t *testing.T) {
+	t.Parallel()
+	elemType := types.ObjectType{AttrTypes: anomalyFilterAttrTypes}
+	for _, raw := range []string{`{}`, ` { } `, `null`, `[]`} {
+		var diags diag.Diagnostics
+		got := anomalyFiltersToList(json.RawMessage(raw), types.ListNull(elemType), &diags)
+		if diags.HasError() || !got.IsNull() {
+			t.Errorf("filters %s read as %v, %v; want null", raw, got, diagSummaries(diags))
+		}
+	}
+	var diags diag.Diagnostics
+	anomalyFiltersToList(json.RawMessage(`{"field":"x"}`), types.ListNull(elemType), &diags)
+	if !diags.HasError() {
+		t.Error("a non-empty filters object was accepted")
+	}
+}
+
+// TestAnomalyBandPreCheckWithoutListPermission covers an RBAC user who may
+// create alerts but not list them: the pre-check steps aside, and the
+// read-back after create decides.
+func TestAnomalyBandPreCheckWithoutListPermission(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("Unauthorized Access"))
+	}))
+	t.Cleanup(srv.Close)
+	c := newClient(srv.URL, "u", "p", "default")
+	known, _, err := c.AnomalyBandSettingsSupported(context.Background(), "default")
+	if err != nil || known {
+		t.Errorf("known %v, err %v; want an undecided pre-check and no error", known, err)
+	}
+}
+
+// TestAnomalyUnauthorizedOrganization reflects the shared Enterprise server,
+// which answers an organization the user cannot see with 401: that is not a
+// missing alert, since it can equally be bad credentials, and the diagnostic
+// says both.
+func TestAnomalyUnauthorizedOrganization(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("Unauthorized Access"))
+	}))
+	t.Cleanup(srv.Close)
+	c := newClient(srv.URL, "u", "p", "default")
+
+	got, err := c.GetAnomalyConfig(ctx, "no_such_org", "abc")
+	if err == nil || got != nil {
+		t.Fatalf("401 read = %+v, %v; want an error", got, err)
+	}
+	summary, detail := anomalyErrorDiag("importing", err)
+	if !strings.Contains(summary, "unauthorized") || !strings.Contains(detail, "org_id") ||
+		!strings.Contains(detail, "credentials") {
+		t.Errorf("diagnostic = %q / %q", summary, detail)
+	}
+}

@@ -51,25 +51,19 @@ resource "openobserve_anomaly_alert" "checkout_volume" {
   alert_destinations = [openobserve_alert_destination.slack.name]
 }
 
-# p95 latency from custom SQL, with a fixed band and delivery settings: only a
-# rise is delivered, and only once 3 of the last 4 buckets are out of band. It
-# recovers when fewer than half of them are.
+# p95 latency per 5-minute bucket, with a fixed band and delivery settings:
+# only a rise is delivered, and only once 3 of the last 4 buckets are out of
+# band. It recovers when fewer than half of them are.
 resource "openobserve_anomaly_alert" "checkout_latency" {
   folder_id   = openobserve_folder.anomalies.folder_id
   name        = "checkout_latency"
   stream_name = "app_logs"
 
-  custom_sql = <<-SQL
-    SELECT histogram(_timestamp, '5m') AS _timestamp,
-           approx_percentile_cont(duration_ms, 0.95) AS value
-    FROM "app_logs"
-    WHERE service = 'checkout'
-    GROUP BY _timestamp
-  SQL
-
-  # In custom SQL mode the field names the query's output column.
+  filters = [
+    { field = "service", operator = "=", value = "checkout" },
+  ]
   detection_function       = "p95"
-  detection_function_field = "value"
+  detection_function_field = "duration_ms"
   histogram_interval       = "5m"
   schedule_interval        = "15m"
   detection_window_seconds = 3600
@@ -86,6 +80,8 @@ resource "openobserve_anomaly_alert" "checkout_latency" {
   tags               = ["prod", "team:checkout"]
 }
 
+# An error rate from custom SQL. The query computes the value of each bucket
+# itself; detection_function_field names the output column that carries it.
 # Let OpenObserve move k to deliver about two alerts a day instead of fixing
 # it. alert_budget_per_day cannot be combined with band_width.
 resource "openobserve_anomaly_alert" "error_rate" {
@@ -129,7 +125,7 @@ output "checkout_volume_band" {
 
 - `detection_function` (String) Aggregation computed per bucket: `count`, `avg`, `sum`, `min`, `max`, `p50`, `p95` or `p99`. Every function except `count` needs `detection_function_field`.
 - `detection_window_seconds` (Number) Look-back of each detection run, in seconds. It must be at least `schedule_interval` plus `histogram_interval`.
-- `histogram_interval` (String) Bucket width of the series, and so the detection interval, as a number and a unit: `30s`, `5m`, `1h` or `1d`.
+- `histogram_interval` (String) Bucket width of the series, and so the detection interval, as a number and a unit: `30s`, `5m`, `1h` or `1d`. It must divide OpenObserve's bucketing origin, 2001-01-01T00:00:00Z (978307200 seconds after the Unix epoch), so that every bucket starts on the same grid: `30s`, `1m`, `5m`, `10m`, `15m`, `30m`, `90m`, `1h`, `2h`, `3h`, `4h`, `6h`, `12h` and `1d` qualify, while `7m`, `11m`, `5h`, `7h`, `10h` and `2d` do not.
 - `name` (String) Anomaly alert name.
 - `schedule_interval` (String) How often detection runs, in the same form as `histogram_interval`. It must be a whole multiple of `histogram_interval`.
 - `stream_name` (String) Stream the detector reads. Changing it replaces the anomaly alert.

@@ -2008,7 +2008,9 @@ func TestIntegrationAnomalyAlertLifecycle(t *testing.T) {
 // t.Cleanup has deleted the config. It skips when too little time is left.
 func anomalyTrainingWait(t *testing.T, limit time.Duration) time.Time {
 	t.Helper()
-	const cleanupMargin = time.Minute
+	// Room for the delete, its RBAC fallback and a disable, each of which can
+	// take up to the client's 60-second request timeout in the worst case.
+	const cleanupMargin = 3 * time.Minute
 	deadline := time.Now().Add(limit)
 	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-cleanupMargin).Before(deadline) {
 		deadline = testDeadline.Add(-cleanupMargin)
@@ -2058,9 +2060,13 @@ func TestIntegrationAnomalyAlertTraining(t *testing.T) {
 		}
 	})
 
+	// Every poll is bounded by the wait deadline, so a hung request cannot
+	// eat into the margin the cleanup needs.
+	pollCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	var got *AnomalyConfigAPI
 	for {
-		got, err = c.GetAnomalyConfig(ctx, org, id)
+		got, err = c.GetAnomalyConfig(pollCtx, org, id)
 		if err != nil || got == nil {
 			t.Fatalf("GetAnomalyConfig = %+v, %v", got, err)
 		}

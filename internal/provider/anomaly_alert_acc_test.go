@@ -1,6 +1,7 @@
 package provider_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -193,6 +194,31 @@ func TestAccAnomalyAlert(t *testing.T) {
 					resource.TestCheckNoResourceAttr(addr, "priority"),
 				),
 			},
+			// Import while every band setting is off its default, so each one
+			// has to round-trip through the server.
+			{
+				ResourceName:      addr,
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateIdFunc: func(s *terraform.State) (string, error) {
+					return s.RootModule().Resources[addr].Primary.ID, nil
+				},
+				ImportStateCheck: func(states []*terraform.InstanceState) error {
+					if len(states) != 1 {
+						return fmt.Errorf("imported %d instances, want 1", len(states))
+					}
+					want := map[string]string{
+						"band_width": "5.5", "alert_direction": "below", "alert_window_buckets": "2",
+						"alert_window_fire_pct": "80", "alert_window_recover_pct": "50", "training_window_days": "30",
+					}
+					for k, v := range want {
+						if got := states[0].Attributes[k]; got != v {
+							return fmt.Errorf("imported %s = %q, want %q", k, got, v)
+						}
+					}
+					return nil
+				},
+			},
 			// band_width and alert_budget_per_day conflict at plan time.
 			{
 				Config: anomalyAccConfig(prefix, stream, name, `
@@ -256,14 +282,46 @@ func TestAccAnomalyAlert(t *testing.T) {
 	})
 }
 
+// getAnomalyStatus reads one alert's training state straight from the API.
+func getAnomalyStatus(ctx context.Context, id string) (trained bool, status string, err error) {
+	org := os.Getenv("OPENOBSERVE_ORG_ID")
+	if org == "" {
+		org = "default"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimRight(os.Getenv("OPENOBSERVE_ENDPOINT"), "/")+"/api/"+org+"/anomaly_detection/"+id, nil)
+	if err != nil {
+		return false, "", err
+	}
+	req.SetBasicAuth(os.Getenv("OPENOBSERVE_USERNAME"), os.Getenv("OPENOBSERVE_PASSWORD"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, "", err
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close error is not actionable
+	var out struct {
+		IsTrained bool   `json:"is_trained"`
+		Status    string `json:"status"`
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, "", err
+	}
+	return out.IsTrained, out.Status, nil
+}
+
 // TestAccAnomalyAlertTraining creates an enabled alert, which starts
 // training, waits for it, and checks the computed band attributes populate on
 // refresh. It runs only with OPENOBSERVE_ANOMALY_TRAINING=1 and
 // OPENOBSERVE_ANOMALY_STREAM naming a logs stream with 21+ days of data.
 //
 // The wait is bounded by the test binary's -timeout, less a margin for the
-// destroy: a timeout kills the process, and the alert would then be left
-// running on the server.
+// one refresh and the destroy that follow it: a timeout kills the process, and
+// the alert would then be left running on the server. The wait polls the API
+// inside a single step, so nothing but that refresh and the destroy runs after
+// the budget is spent.
 func TestAccAnomalyAlertTraining(t *testing.T) {
 	prefix, stream := anomalyAccPreCheck(t)
 	if os.Getenv("OPENOBSERVE_ANOMALY_TRAINING") != "1" || stream == "" {
@@ -284,51 +342,44 @@ func TestAccAnomalyAlertTraining(t *testing.T) {
 	config := strings.Replace(anomalyAccConfig(prefix, stream, name, ""),
 		"enabled                  = false\n", "enabled                  = true\n", 1)
 
-	trained := func(s *terraform.State) error {
-		attrs := s.RootModule().Resources[addr].Primary.Attributes
-		if attrs["is_trained"] != "true" {
-			return fmt.Errorf("not trained in the time the test timeout allows: status %q", attrs["status"])
+	waitForTraining := func(s *terraform.State) error {
+		id := s.RootModule().Resources[addr].Primary.Attributes["anomaly_id"]
+		ctx, cancel := context.WithDeadline(context.Background(), waitUntil)
+		defer cancel()
+		for {
+			trained, status, err := getAnomalyStatus(ctx, id)
+			switch {
+			case err == nil && trained && status == "ready":
+				return nil
+			case err == nil && status == "failed":
+				return fmt.Errorf("training failed")
+			case time.Until(waitUntil) < 15*time.Second:
+				return fmt.Errorf("not trained in the time the test timeout allows: status %q, last error %v", status, err)
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("not trained in the time the test timeout allows: status %q", status)
+			case <-time.After(15 * time.Second):
+			}
 		}
-		return nil
 	}
 
-	// Each refresh step re-reads the alert. A step only waits while there is
-	// time left, so once the budget is spent the remaining steps run straight
-	// through to the final check and the destroy.
-	const poll = 15 * time.Second
-	done := false
-	steps := []resource.TestStep{{Config: config}}
-	for i := 0; i < 40; i++ {
-		steps = append(steps, resource.TestStep{
-			PreConfig: func() {
-				if !done && time.Until(waitUntil) > poll {
-					time.Sleep(poll)
-				}
-			},
-			RefreshState: true,
-			Check: func(s *terraform.State) error {
-				if trained(s) != nil {
-					return nil // keep waiting
-				}
-				done = true
-				return resource.ComposeAggregateTestCheckFunc(
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             checkAnomalyAlertsDestroyed,
+		Steps: []resource.TestStep{
+			{Config: config, Check: waitForTraining},
+			{
+				RefreshState: true,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(addr, "is_trained", "true"),
 					resource.TestCheckResourceAttr(addr, "status", "ready"),
 					resource.TestCheckResourceAttrSet(addr, "band_grouping"),
 					resource.TestCheckResourceAttrSet(addr, "band_k"),
 					resource.TestCheckResourceAttrSet(addr, "training_data_start_us"),
 					resource.TestCheckResourceAttrSet(addr, "training_data_end_us"),
-				)(s)
+				),
 			},
-		})
-	}
-	steps = append(steps, resource.TestStep{
-		RefreshState: true,
-		Check:        trained,
-	})
-
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		CheckDestroy:             checkAnomalyAlertsDestroyed,
-		Steps:                    steps,
+		},
 	})
 }

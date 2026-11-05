@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/float64validator"
@@ -235,8 +236,11 @@ func (r *AnomalyAlertResource) Schema(_ context.Context, _ resource.SchemaReques
 			"histogram_interval": schema.StringAttribute{
 				Required: true,
 				Description: "Bucket width of the series, and so the detection interval, as a number and a unit: " +
-					"`30s`, `5m`, `1h` or `1d`.",
-				Validators: []validator.String{intervalValidator()},
+					"`30s`, `5m`, `1h` or `1d`. It must divide OpenObserve's bucketing origin, 2001-01-01T00:00:00Z " +
+					"(978307200 seconds after the Unix epoch), so that every bucket starts on the same grid: `30s`, " +
+					"`1m`, `5m`, `10m`, `15m`, `30m`, `90m`, `1h`, `2h`, `3h`, `4h`, `6h`, `12h` and `1d` qualify, while " +
+					"`7m`, `11m`, `5h`, `7h`, `10h` and `2d` do not.",
+				Validators: []validator.String{intervalValidator(), histogramOriginValidator{}},
 			},
 			"schedule_interval": schema.StringAttribute{
 				Required: true,
@@ -255,7 +259,7 @@ func (r *AnomalyAlertResource) Schema(_ context.Context, _ resource.SchemaReques
 				Computed:    true,
 				Default:     int64default.StaticInt64(28),
 				Description: "Days of history training reads. Training always reads at least 21 days. Defaults to `28`.",
-				Validators:  []validator.Int64{int64validator.AtLeast(1)},
+				Validators:  []validator.Int64{int64validator.Between(1, math.MaxInt32)},
 			},
 			"retrain_interval_days": schema.Int64Attribute{
 				Optional:    true,
@@ -293,7 +297,7 @@ func (r *AnomalyAlertResource) Schema(_ context.Context, _ resource.SchemaReques
 				Default:  int64default.StaticInt64(1),
 				Description: "Length of the alert window in buckets, at least 1. The window times " +
 					"`histogram_interval` must span at most 24 hours, which the server checks. Defaults to `1`.",
-				Validators: []validator.Int64{int64validator.AtLeast(1)},
+				Validators: []validator.Int64{int64validator.Between(1, math.MaxInt32)},
 			},
 			"alert_window_fire_pct": schema.Float64Attribute{
 				Optional: true,
@@ -384,6 +388,54 @@ func (r *AnomalyAlertResource) Schema(_ context.Context, _ resource.SchemaReques
 func intervalValidator() validator.String {
 	return stringvalidator.RegexMatches(anomalyIntervalPattern,
 		"must be a whole number followed by s, m, h or d, for example `5m` or `1h`")
+}
+
+// histogramOriginSecs is the origin OpenObserve's histogram() buckets from,
+// 2001-01-01T00:00:00Z. An interval that does not divide it puts indexed and
+// unindexed runs on different grids, so the server rejects it.
+const histogramOriginSecs = 978307200
+
+// intervalSeconds parses the server's interval grammar; ok is false when it
+// does not match or overflows.
+func intervalSeconds(v string) (int64, bool) {
+	if !anomalyIntervalPattern.MatchString(v) {
+		return 0, false
+	}
+	unit := map[byte]int64{'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[v[len(v)-1]]
+	n, err := strconv.ParseInt(v[:len(v)-1], 10, 64)
+	if err != nil || n > math.MaxInt64/unit {
+		return 0, false
+	}
+	return n * unit, true
+}
+
+// histogramOriginValidator rejects a histogram_interval that does not divide
+// the bucketing origin, the rule the server applies on create and update.
+type histogramOriginValidator struct{}
+
+func (histogramOriginValidator) Description(context.Context) string {
+	return "must divide the histogram origin 2001-01-01T00:00:00Z"
+}
+
+func (v histogramOriginValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (histogramOriginValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if !knownAndSet(req.ConfigValue) {
+		return
+	}
+	secs, ok := intervalSeconds(req.ConfigValue.ValueString())
+	if !ok || secs <= 0 {
+		return // the grammar validator reports these
+	}
+	if histogramOriginSecs%secs != 0 {
+		resp.Diagnostics.AddAttributeError(req.Path, "histogram_interval is off the bucket grid",
+			fmt.Sprintf("%q (%d seconds) does not divide OpenObserve's bucketing origin, 2001-01-01T00:00:00Z "+
+				"(978307200 seconds), so its buckets would not line up between runs and the server rejects it. "+
+				"Use an interval such as 5m, 10m, 15m, 30m, 1h, 2h, 3h, 4h, 6h, 12h or 1d.",
+				req.ConfigValue.ValueString(), secs))
+	}
 }
 
 // ValidateConfig checks the cross-field rules that need no server state. The
@@ -985,7 +1037,10 @@ func applyAnomalyToModel(ctx context.Context, cfg *AnomalyConfigAPI, m *AnomalyA
 func anomalyFiltersToList(raw json.RawMessage, prior types.List, diags *diag.Diagnostics) types.List {
 	elemType := types.ObjectType{AttrTypes: anomalyFilterAttrTypes}
 	var rows []map[string]any
-	if len(raw) > 0 && string(raw) != "null" {
+	// Rows written before the server normalized filters can hold `{}`, which
+	// it reads as "no filters".
+	trimmed := strings.TrimSpace(string(raw))
+	if len(trimmed) > 0 && trimmed != "null" && !isEmptyJSONObject([]byte(trimmed)) {
 		if err := json.Unmarshal(raw, &rows); err != nil {
 			diags.AddError("Error decoding anomaly alert filters", err.Error())
 			return types.ListNull(elemType)

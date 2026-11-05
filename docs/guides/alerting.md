@@ -331,6 +331,11 @@ bucket whose value leaves the band `expected ± k·σ`. It is a separate resourc
 because OpenObserve stores it as an anomaly detection config, not as a v2 alert.
 It requires **OpenObserve Enterprise v1.1.0 or later**.
 
+`histogram_interval` must divide OpenObserve's bucketing origin,
+2001-01-01T00:00:00Z, so that every run buckets on the same grid. `5m`, `15m`,
+`1h`, `6h` and `1d` qualify; `7m`, `11m`, `5h` and `2d` do not, and are rejected
+at plan time.
+
 ```hcl
 resource "openobserve_anomaly_alert" "checkout_volume" {
   name        = "checkout_volume"
@@ -724,25 +729,19 @@ resource "openobserve_anomaly_alert" "checkout_volume" {
   alert_destinations = [openobserve_alert_destination.slack.name]
 }
 
-# p95 latency from custom SQL, with a fixed band and delivery settings: only a
-# rise is delivered, and only once 3 of the last 4 buckets are out of band. It
-# recovers when fewer than half of them are.
+# p95 latency per 5-minute bucket, with a fixed band and delivery settings:
+# only a rise is delivered, and only once 3 of the last 4 buckets are out of
+# band. It recovers when fewer than half of them are.
 resource "openobserve_anomaly_alert" "checkout_latency" {
   folder_id   = openobserve_folder.anomalies.folder_id
   name        = "checkout_latency"
   stream_name = "app_logs"
 
-  custom_sql = <<-SQL
-    SELECT histogram(_timestamp, '5m') AS _timestamp,
-           approx_percentile_cont(duration_ms, 0.95) AS value
-    FROM "app_logs"
-    WHERE service = 'checkout'
-    GROUP BY _timestamp
-  SQL
-
-  # In custom SQL mode the field names the query's output column.
+  filters = [
+    { field = "service", operator = "=", value = "checkout" },
+  ]
   detection_function       = "p95"
-  detection_function_field = "value"
+  detection_function_field = "duration_ms"
   histogram_interval       = "5m"
   schedule_interval        = "15m"
   detection_window_seconds = 3600
@@ -759,6 +758,8 @@ resource "openobserve_anomaly_alert" "checkout_latency" {
   tags               = ["prod", "team:checkout"]
 }
 
+# An error rate from custom SQL. The query computes the value of each bucket
+# itself; detection_function_field names the output column that carries it.
 # Let OpenObserve move k to deliver about two alerts a day instead of fixing
 # it. alert_budget_per_day cannot be combined with band_width.
 resource "openobserve_anomaly_alert" "error_rate" {
