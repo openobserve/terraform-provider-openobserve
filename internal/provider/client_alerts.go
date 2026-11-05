@@ -177,6 +177,9 @@ type AlertQueryConditionAPI struct {
 	SearchEventType    *string                    `json:"search_event_type,omitempty"`
 	MultiTimeRange     []AlertCompareHistoricData `json:"multi_time_range,omitempty"`
 	SloCondition       *AlertSloConditionAPI      `json:"slo_condition,omitempty"`
+	// PromQLRuleMode has no attribute yet; an update sends back what the
+	// server holds. See keepUnmanagedSettings.
+	PromQLRuleMode bool `json:"promql_rule_mode,omitempty"`
 }
 
 // AlertDeduplicationAPI collapses repeated firings of the same underlying issue.
@@ -237,11 +240,15 @@ type AlertAPI struct {
 	// value, because the server replaces the whole alert and an absent field
 	// would reset it to false.
 	NotifyOnRecovery *bool `json:"notify_on_recovery,omitempty"`
-	// The recovery settings below have no attribute yet. They are read and
-	// sent back unchanged on update, so the whole-alert replace keeps them.
-	RecoveryDestinations []string `json:"recovery_destinations,omitempty"`
-	KeepFiringFor        int64    `json:"keep_firing_for,omitempty"`
-	SuppressRepeats      bool     `json:"suppress_repeats,omitempty"`
+	// The fields below have no attribute yet. They are read and sent back
+	// unchanged on update, so the whole-alert replace keeps them. See
+	// keepUnmanagedSettings.
+	RecoveryDestinations  []string `json:"recovery_destinations,omitempty"`
+	KeepFiringFor         int64    `json:"keep_firing_for,omitempty"`
+	SuppressRepeats       bool     `json:"suppress_repeats,omitempty"`
+	RunbookURL            *string  `json:"runbook_url,omitempty"`
+	OncallTeam            *string  `json:"oncall_team,omitempty"`
+	IncidentTitleTemplate *string  `json:"incident_title_template,omitempty"`
 }
 
 // AlertListItemAPI is one entry of the alerts list response.

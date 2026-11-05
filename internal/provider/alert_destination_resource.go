@@ -60,7 +60,11 @@ func (r *AlertDestinationResource) Metadata(_ context.Context, req resource.Meta
 func (r *AlertDestinationResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "Manages an alert destination: where OpenObserve delivers a notification when an alert fires. " +
-			"A destination is a webhook (`http`), a set of email recipients (`email`), or an AWS SNS topic (`sns`).",
+			"A destination is a webhook (`http`), a set of email recipients (`email`), or an AWS SNS topic (`sns`).\n\n" +
+			"OpenObserve replaces the whole destination on update. Settings this resource does not manage yet are " +
+			"read from the server before each update and sent back unchanged, so a prebuilt destination created " +
+			"in the UI (PagerDuty, Jira, Splunk and the like) keeps its kind: `output_format`, " +
+			"`destination_type_name` and `action_id`. `metadata` is kept the same way while it is unset.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -305,11 +309,11 @@ func (r *AlertDestinationResource) Update(ctx context.Context, req resource.Upda
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	r.keepUnmanagedFields(ctx, org, name, configuredMetadata, &body, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	if configuredMetadata.IsNull() {
-		body.Metadata = r.metadataForUpdate(ctx, org, name, &resp.Diagnostics)
-		if resp.Diagnostics.HasError() {
-			return
-		}
 		// The plan carries the map last read, and state keeps it, as Terraform
 		// requires, even when the server's map changed after the plan was made;
 		// the next refresh reads that without a diff, because the attribute is
@@ -330,25 +334,33 @@ func (r *AlertDestinationResource) Update(ctx context.Context, req resource.Upda
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// metadataForUpdate returns the metadata the server holds, for an update whose
-// configuration leaves `metadata` unset.
+// keepUnmanagedFields fills in what an update sends for the fields the
+// configuration does not decide.
 //
-// The update endpoint replaces the whole destination, so an update without
-// metadata clears it. The current map is read just before the write rather
-// than taken from state, which may be stale or, for state written by a release
-// that did not know the attribute, empty.
-func (r *AlertDestinationResource) metadataForUpdate(ctx context.Context, org, name string, diags *diag.Diagnostics) map[string]string {
+// The update endpoint replaces the whole destination, so any field the body
+// leaves out is cleared. output_format, destination_type_name and action_id
+// have no attribute, and metadata may be unset; those are read just before the
+// write and sent back. State is not used for this: it may be stale or, for
+// state written by a release that did not know the attribute, empty. Losing
+// destination_type_name would leave a prebuilt destination half converted,
+// still marked prebuilt in its metadata but no longer formatted as one.
+func (r *AlertDestinationResource) keepUnmanagedFields(ctx context.Context, org, name string, configuredMetadata types.Map, body *AlertDestinationAPI, diags *diag.Diagnostics) {
 	current, err := r.client.GetAlertDestination(ctx, org, name)
 	if err != nil {
 		diags.AddError("Error reading alert destination before update",
-			"metadata is not set in the configuration, so the provider reads the server's value to keep "+
-				"it, and that read failed: "+err.Error())
-		return nil
+			"The update replaces the whole destination, so the provider reads the settings it does not "+
+				"manage, to send them back, and that read failed: "+err.Error())
+		return
 	}
 	if current == nil {
-		return nil
+		return
 	}
-	return current.Metadata
+	body.OutputFormat = current.OutputFormat
+	body.DestinationTypeName = current.DestinationTypeName
+	body.ActionID = current.ActionID
+	if configuredMetadata.IsNull() {
+		body.Metadata = current.Metadata
+	}
 }
 
 func (r *AlertDestinationResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {

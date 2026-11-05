@@ -5,6 +5,7 @@ subcategory: ""
 description: |-
   Manages an OpenObserve alert.
   An alert evaluates a query against a stream and notifies one or more destinations when the result crosses a threshold. Set is_real_time for alerts that fire as matching data arrives; leave it false for scheduled alerts driven by trigger_condition.frequency.
+  OpenObserve replaces the whole alert on update. Settings this resource does not manage yet are read from the server before each update and sent back unchanged, so a value set in the UI or through the API survives: runbook_url, oncall_team, incident_title_template, recovery_destinations, keep_firing_for, suppress_repeats and query_condition.promql_rule_mode. See notify_on_recovery for the cases where the server forces some of them off.
 ---
 
 # openobserve_alert (Resource)
@@ -12,6 +13,8 @@ description: |-
 Manages an OpenObserve alert.
 
 An alert evaluates a query against a stream and notifies one or more destinations when the result crosses a threshold. Set `is_real_time` for alerts that fire as matching data arrives; leave it false for scheduled alerts driven by `trigger_condition.frequency`.
+
+OpenObserve replaces the whole alert on update. Settings this resource does not manage yet are read from the server before each update and sent back unchanged, so a value set in the UI or through the API survives: `runbook_url`, `oncall_team`, `incident_title_template`, `recovery_destinations`, `keep_firing_for`, `suppress_repeats` and `query_condition.promql_rule_mode`. See `notify_on_recovery` for the cases where the server forces some of them off.
 
 ## Example Usage
 
@@ -213,7 +216,9 @@ resource "openobserve_alert" "burning_fast" {
 - `is_real_time` (Boolean) Evaluate as data arrives instead of on a schedule.
 - `notify_on_recovery` (Boolean) Send a notification when a firing alert recovers, that is, when its condition clears. A multi-alert sends one per recovered group.
 
-Leave it unset to keep whatever the server holds: the provider reads the current value and sends it back on every update, so a flag switched on in the UI or through the API is never turned off by an unrelated change. Set it to manage the flag, and a change made elsewhere then shows as drift. A new alert created without it takes the server default, `false`. Removing the attribute from a configuration that set it stops managing it and leaves the server value as it is.
+Leave it unset to keep whatever the server holds across updates: the provider reads the current value and sends it back on every update, so a flag switched on in the UI or through the API is not turned off by an unrelated change. Set it to manage the flag, and a change made elsewhere then shows as drift. An alert created without it, including one Terraform replaces (a change to `stream_type` or `stream_name`), starts from the server default, `false`, so configure it where it must survive a replacement. Removing the attribute from a configuration that set it stops managing it and leaves the server value as it is.
+
+While it is `true`, the server checks the recovery path on every save, update included, and refuses one it could not deliver, for example a PagerDuty destination with no integration key, or a platform destination whose template does not render a JSON object. An update that left the flag on can therefore fail on a destination that has not changed.
 
 The value is read again at apply time, so if it changed on the server after the plan was made (or the plan used `-refresh=false`), the update still sends the server's value. State records the planned value for that apply and picks up the server's on the next refresh, with no diff.
 

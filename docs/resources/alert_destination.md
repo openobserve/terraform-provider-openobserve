@@ -4,11 +4,14 @@ page_title: "openobserve_alert_destination Resource - openobserve"
 subcategory: ""
 description: |-
   Manages an alert destination: where OpenObserve delivers a notification when an alert fires. A destination is a webhook (http), a set of email recipients (email), or an AWS SNS topic (sns).
+  OpenObserve replaces the whole destination on update. Settings this resource does not manage yet are read from the server before each update and sent back unchanged, so a prebuilt destination created in the UI (PagerDuty, Jira, Splunk and the like) keeps its kind: output_format, destination_type_name and action_id. metadata is kept the same way while it is unset.
 ---
 
 # openobserve_alert_destination (Resource)
 
 Manages an alert destination: where OpenObserve delivers a notification when an alert fires. A destination is a webhook (`http`), a set of email recipients (`email`), or an AWS SNS topic (`sns`).
+
+OpenObserve replaces the whole destination on update. Settings this resource does not manage yet are read from the server before each update and sent back unchanged, so a prebuilt destination created in the UI (PagerDuty, Jira, Splunk and the like) keeps its kind: `output_format`, `destination_type_name` and `action_id`. `metadata` is kept the same way while it is unset.
 
 ## Example Usage
 

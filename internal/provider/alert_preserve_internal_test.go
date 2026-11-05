@@ -145,6 +145,9 @@ func storedRecoveringAlert() map[string]any {
 	a["recovery_destinations"] = []string{"d2"}
 	a["keep_firing_for"] = 120
 	a["suppress_repeats"] = true
+	a["runbook_url"] = "https://runbooks.example/high-errors"
+	a["oncall_team"] = "team-1"
+	a["incident_title_template"] = "{alert_name} on {host}"
 	return a
 }
 
@@ -214,6 +217,77 @@ func runAlertUpdate(t *testing.T, plannedRecovery, priorRecovery, configuredReco
 		}
 	}
 	return fake, got, resp
+}
+
+// Settings with no attribute survive an update, whatever the configuration
+// says about notify_on_recovery and on a real-time alert too, because the
+// whole-alert replace would otherwise clear them.
+func TestAlertUpdateKeepsUnmanagedSettings(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		configured types.Bool
+		realTime   bool
+	}{
+		"recovery unset":    {types.BoolNull(), false},
+		"recovery off":      {types.BoolValue(false), false},
+		"real-time, off":    {types.BoolValue(false), true},
+		"recovery explicit": {types.BoolValue(true), false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			planned := tc.configured
+			if planned.IsNull() {
+				planned = types.BoolValue(true)
+			}
+			fake, _, resp := runAlertUpdate(t, planned, types.BoolValue(true), tc.configured, tc.realTime)
+			if resp.Diagnostics.HasError() {
+				t.Fatalf("update: %+v", resp.Diagnostics)
+			}
+			want := map[string]string{
+				"runbook_url":             "https://runbooks.example/high-errors",
+				"oncall_team":             "team-1",
+				"incident_title_template": "{alert_name} on {host}",
+			}
+			for k, v := range want {
+				if fake.lastPut[k] != v {
+					t.Errorf("PUT %s: got %v, want %q", k, fake.lastPut[k], v)
+				}
+				if fake.get(testAlertPath)[k] != v {
+					t.Errorf("server lost %s across the update", k)
+				}
+			}
+		})
+	}
+}
+
+// promql_rule_mode is kept while the alert stays a PromQL alert.
+func TestAlertUpdateKeepsPromQLRuleMode(t *testing.T) {
+	t.Parallel()
+	fake, srv := newReplacingServer(t)
+	stored := storedAlert(false)
+	stored["stream_type"] = "metrics"
+	stored["query_condition"] = map[string]any{"type": "promql", "promql": "up == 0", "promql_rule_mode": true}
+	fake.put(testAlertPath, stored)
+	r := &AlertResource{client: newClient(srv.URL, "u", "p", "default")}
+
+	model := func(description string) AlertResourceModel {
+		m := alertModel(description, types.BoolValue(false))
+		m.StreamType = types.StringValue("metrics")
+		m.QueryCondition.QueryType = types.StringValue("promql")
+		m.QueryCondition.SQL = types.StringNull()
+		m.QueryCondition.PromQL = types.StringValue("up == 0")
+		return m
+	}
+	req, resp := updateRequest(t, r, model("after"), model("before"), model("after"))
+	r.Update(context.Background(), req, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("update: %+v", resp.Diagnostics)
+	}
+	qc, _ := fake.lastPut["query_condition"].(map[string]any)
+	if qc["promql_rule_mode"] != true {
+		t.Errorf("PUT query_condition.promql_rule_mode: got %v, want true", qc["promql_rule_mode"])
+	}
 }
 
 // The update endpoint replaces the whole alert, so an update that left the
@@ -584,6 +658,54 @@ func TestAlertDestinationUpdateServerFlipBetweenPlanAndApply(t *testing.T) {
 	}
 	if !got.Metadata.Equal(planned) {
 		t.Errorf("state metadata: got %v, want the planned %v", got.Metadata, planned)
+	}
+}
+
+// A destination created in the UI from a prebuilt kind carries fields with no
+// attribute. Losing them on update would leave it half converted: still
+// marked prebuilt in its metadata, but no longer formatted as one.
+func TestAlertDestinationUpdateKeepsUnmanagedFields(t *testing.T) {
+	t.Parallel()
+	for name, configured := range map[string]types.Map{
+		"metadata unset":      types.MapNull(types.StringType),
+		"metadata configured": stringMap(map[string]string{"prebuilt_type": "pagerduty"}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			fake, srv := newReplacingServer(t)
+			stored := storedDestination(map[string]any{"prebuilt_type": "pagerduty"})
+			stored["destination_type_name"] = "pagerduty"
+			stored["output_format"] = "nestedevent"
+			stored["action_id"] = "act-1"
+			fake.put(testDestinationPath, stored)
+			r := &AlertDestinationResource{client: newClient(srv.URL, "u", "p", "default")}
+
+			planned := configured
+			if planned.IsNull() {
+				planned = stringMap(map[string]string{"prebuilt_type": "pagerduty"})
+			}
+			req, resp := updateRequest(t, r,
+				destinationModel("https://hooks.example/b", planned),
+				destinationModel("https://hooks.example/a", planned),
+				destinationModel("https://hooks.example/b", configured),
+			)
+			r.Update(context.Background(), req, resp)
+			if resp.Diagnostics.HasError() {
+				t.Fatalf("update: %+v", resp.Diagnostics)
+			}
+			for k, v := range map[string]string{
+				"destination_type_name": "pagerduty",
+				"output_format":         "nestedevent",
+				"action_id":             "act-1",
+			} {
+				if fake.lastPut[k] != v {
+					t.Errorf("PUT %s: got %v, want %q", k, fake.lastPut[k], v)
+				}
+			}
+			if fake.lastPut["url"] != "https://hooks.example/b" {
+				t.Errorf("PUT url: got %v, want the planned change", fake.lastPut["url"])
+			}
+		})
 	}
 }
 

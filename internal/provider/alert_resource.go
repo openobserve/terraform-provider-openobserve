@@ -248,7 +248,12 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 		Description: "Manages an OpenObserve alert.\n\n" +
 			"An alert evaluates a query against a stream and notifies one or more destinations when the result crosses " +
 			"a threshold. Set `is_real_time` for alerts that fire as matching data arrives; leave it false for scheduled " +
-			"alerts driven by `trigger_condition.frequency`.",
+			"alerts driven by `trigger_condition.frequency`.\n\n" +
+			"OpenObserve replaces the whole alert on update. Settings this resource does not manage yet are read " +
+			"from the server before each update and sent back unchanged, so a value set in the UI or through the " +
+			"API survives: `runbook_url`, `oncall_team`, `incident_title_template`, `recovery_destinations`, " +
+			"`keep_firing_for`, `suppress_repeats` and `query_condition.promql_rule_mode`. See " +
+			"`notify_on_recovery` for the cases where the server forces some of them off.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -365,16 +370,21 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				// update, so a default would turn the flag off on every alert that
 				// had it switched on outside Terraform. Unset, the plan carries the
 				// value last read and the update sends whatever the server holds;
-				// see keepRecoverySettings.
+				// see keepUnmanagedSettings.
 				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 				Description: "Send a notification when a firing alert recovers, that is, when its condition " +
 					"clears. A multi-alert sends one per recovered group.\n\n" +
-					"Leave it unset to keep whatever the server holds: the provider reads the current value " +
-					"and sends it back on every update, so a flag switched on in the UI or through the API is " +
-					"never turned off by an unrelated change. Set it to manage the flag, and a change made " +
-					"elsewhere then shows as drift. A new alert created without it takes the server default, " +
-					"`false`. Removing the attribute from a configuration that set it stops managing it and " +
-					"leaves the server value as it is.\n\n" +
+					"Leave it unset to keep whatever the server holds across updates: the provider reads the " +
+					"current value and sends it back on every update, so a flag switched on in the UI or through " +
+					"the API is not turned off by an unrelated change. Set it to manage the flag, and a change " +
+					"made elsewhere then shows as drift. An alert created without it, including one Terraform " +
+					"replaces (a change to `stream_type` or `stream_name`), starts from the server default, " +
+					"`false`, so configure it where it must survive a replacement. Removing the attribute from a " +
+					"configuration that set it stops managing it and leaves the server value as it is.\n\n" +
+					"While it is `true`, the server checks the recovery path on every save, update included, " +
+					"and refuses one it could not deliver, for example a PagerDuty destination with no " +
+					"integration key, or a platform destination whose template does not render a JSON object. " +
+					"An update that left the flag on can therefore fail on a destination that has not changed.\n\n" +
 					"The value is read again at apply time, so if it changed on the server after the plan was " +
 					"made (or the plan used `-refresh=false`), the update still sends the server's value. State " +
 					"records the planned value for that apply and picks up the server's on the next refresh, " +
@@ -957,7 +967,7 @@ func (r *AlertResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	r.keepRecoverySettings(ctx, org, alertID, configuredRecovery, &body, &resp.Diagnostics)
+	r.keepUnmanagedSettings(ctx, org, alertID, configuredRecovery, &body, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -996,30 +1006,42 @@ func (r *AlertResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// keepRecoverySettings fills in the recovery settings an update sends.
+// keepUnmanagedSettings fills in what an update sends for the settings the
+// configuration does not decide.
 //
 // The update endpoint replaces the whole alert, so any field the body leaves
 // out is reset. A configured notify_on_recovery is sent as written. An unset
-// one, and the recovery settings that have no attribute (recovery_destinations,
-// keep_firing_for, suppress_repeats), are read from the server just before the
-// write. State is not used for this: it may be stale (a plan made with
-// -refresh=false) or written by a release that did not know the attribute.
+// one, and the settings that have no attribute (recovery_destinations,
+// keep_firing_for, suppress_repeats, runbook_url, oncall_team,
+// incident_title_template, promql_rule_mode), are read from the server just
+// before the write. State is not used for this: it may be stale (a plan made
+// with -refresh=false) or written by a release that did not know the
+// attribute.
 //
 // A real-time alert can carry none of these, and the server rejects an alert
 // that does. The settings without an attribute are dropped for one, because
 // the configuration has no way to clear them. notify_on_recovery is never
 // dropped silently: when the server holds true and the configuration does not
 // say, the update stops and asks for an explicit `false`.
-func (r *AlertResource) keepRecoverySettings(ctx context.Context, org, alertID string, configured types.Bool, body *AlertAPI, diags *diag.Diagnostics) {
+func (r *AlertResource) keepUnmanagedSettings(ctx context.Context, org, alertID string, configured types.Bool, body *AlertAPI, diags *diag.Diagnostics) {
 	current, err := r.client.GetAlert(ctx, org, alertID)
 	if err != nil {
 		diags.AddError("Error reading alert before update",
-			"The update replaces the whole alert, so the provider reads the recovery settings it does not "+
-				"manage, to send them back, and that read failed: "+err.Error())
+			"The update replaces the whole alert, so the provider reads the settings it does not manage, "+
+				"to send them back, and that read failed: "+err.Error())
 		return
 	}
 	if current == nil {
 		current = &AlertAPI{}
+	}
+
+	body.RunbookURL = current.RunbookURL
+	body.OncallTeam = current.OncallTeam
+	body.IncidentTitleTemplate = current.IncidentTitleTemplate
+	// Rule mode only means something on a PromQL alert, and the server ignores
+	// it on any other, so it is kept only while the alert stays PromQL.
+	if body.QueryCondition.QueryType == "promql" && current.QueryCondition.QueryType == "promql" {
+		body.QueryCondition.PromQLRuleMode = current.QueryCondition.PromQLRuleMode
 	}
 
 	notify := current.NotifyOnRecovery != nil && *current.NotifyOnRecovery
