@@ -141,3 +141,65 @@ resource "openobserve_pipeline" "errors_only" {
     to   = "out"
   }
 }
+
+# The v2 condition format is a flat list read left to right, the way the UI
+# builds a filter. Mark it with `version = 2`, the same wrapper an alert's v2
+# conditions use. Each item's `logicalOperator` joins it to the item before it,
+# AND binds tighter than OR, and a nested group acts as parentheses. This one
+# keeps `level contains "err" AND (code = 500 OR code = 503)`, plus anything
+# from the pager service in any case.
+resource "openobserve_stream" "http" {
+  name        = "http_events"
+  stream_type = "logs"
+}
+
+resource "openobserve_pipeline" "server_errors" {
+  name        = "server_errors"
+  stream_name = openobserve_stream.http.name
+
+  node {
+    id          = "in"
+    type        = "stream"
+    stream_name = openobserve_stream.http.name
+  }
+
+  node {
+    id   = "filter"
+    type = "condition"
+    conditions = jsonencode({
+      version = 2
+      conditions = {
+        filterType      = "group"
+        logicalOperator = "AND"
+        conditions = [
+          { filterType = "condition", column = "level", operator = "contains", value = "err", logicalOperator = "AND" },
+          {
+            filterType      = "group"
+            logicalOperator = "AND"
+            conditions = [
+              { filterType = "condition", column = "code", operator = "=", value = 500, logicalOperator = "AND" },
+              { filterType = "condition", column = "code", operator = "=", value = 503, logicalOperator = "OR" },
+            ]
+          },
+          { filterType = "condition", column = "service", operator = "=", value = "pager", ignore_case = true, logicalOperator = "OR" },
+        ]
+      }
+    })
+  }
+
+  node {
+    id          = "out"
+    type        = "stream"
+    stream_name = openobserve_stream.app_logs_clean.name
+  }
+
+  edge {
+    from = "in"
+    to   = "filter"
+  }
+
+  edge {
+    from = "filter"
+    to   = "out"
+  }
+}
