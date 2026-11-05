@@ -229,7 +229,16 @@ func (r *PipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 						"conditions": schema.StringAttribute{
 							Optional: true,
 							Description: "For a `condition` node, the filter as a JSON document. Build it with " +
-								"`jsonencode()`. An empty condition set is rejected by the server.",
+								"`jsonencode()`. An empty condition set is rejected by the server.\n\n" +
+								"Two formats are accepted, the same two an alert's `query_condition.conditions` takes:\n\n" +
+								"- v1, the default: a list of `{ column, operator, value, ignore_case }` conditions, " +
+								"all of which must match, or an `and`, `or` or `not` tree of them.\n" +
+								"- v2: `{ version = 2, conditions = { filterType = \"group\", logicalOperator = " +
+								"\"AND\", conditions = [ ... ] } }`. Each item is a `filterType = \"condition\"` with " +
+								"`column`, `operator`, `value` (required, `\"\"` for a unary operator such as " +
+								"`is_null`) and an optional `ignore_case`, or a nested " +
+								"`filterType = \"group\"` with its own `conditions`. An item's `logicalOperator` " +
+								"(`AND` or `OR`) joins it to the item before it, and `AND` binds tighter than `OR`.",
 						},
 					},
 				},
@@ -283,6 +292,18 @@ func (r *PipelineResource) ValidateConfig(ctx context.Context, req resource.Vali
 			requirePipelineAttr(resp, nodePath, node.DestinationName, "destination_name", "remote_stream")
 		case "condition":
 			requirePipelineAttr(resp, nodePath, node.Conditions, "conditions", "condition")
+			if knownAndSet(node.Conditions) {
+				if problem := pipelineConditionsProblem(node.Conditions.ValueString()); problem != "" {
+					resp.Diagnostics.AddAttributeError(nodePath.AtName("conditions"), "Invalid conditions", problem)
+				}
+			}
+		}
+		// Only a condition node sends its conditions, so on any other node they
+		// would be dropped and read back as null.
+		if node.Type.ValueString() != "condition" && knownAndSet(node.Conditions) {
+			resp.Diagnostics.AddAttributeError(nodePath.AtName("conditions"), "Conditions on a non-condition node",
+				fmt.Sprintf("`conditions` applies only to a `condition` node, and this node is a `%s` node.",
+					node.Type.ValueString()))
 		}
 	}
 
@@ -470,7 +491,7 @@ func (r *PipelineResource) apiFromModel(model *PipelineResourceModel, org string
 			data.AfterFlatten = &afterFlatten
 		case "condition":
 			if knownAndSet(n.Conditions) {
-				data.Conditions = []byte(n.Conditions.ValueString())
+				data.Version, data.Conditions = splitPipelineConditions(n.Conditions.ValueString())
 			}
 		}
 
@@ -711,8 +732,11 @@ func (r *PipelineResource) applyToModel(ctx context.Context, api *PipelineAPI, m
 			if len(n.Data.Conditions) > 0 {
 				// A condition node carries the same document an alert does, and
 				// the server rewrites operator spelling here too, so it needs
-				// the same reconciliation.
-				node.Conditions = conditionsToModel(priorConditions[n.ID], n.Data.Conditions, diags)
+				// the same reconciliation. A v2 node is first wrapped back into
+				// `{"version": 2, "conditions": ...}`, the form the
+				// configuration writes.
+				node.Conditions = conditionsToModel(priorConditions[n.ID],
+					joinPipelineConditions(n.Data.Version, n.Data.Conditions), diags)
 			}
 		}
 		nodes = append(nodes, node)

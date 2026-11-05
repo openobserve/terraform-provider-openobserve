@@ -224,7 +224,10 @@ type PipelineNodeDataAPI struct {
 	AfterFlatten *bool  `json:"after_flatten,omitempty"`
 	NumArgs      int64  `json:"num_args,omitempty"`
 
-	// condition
+	// condition. Version is absent for v1, which is the server's default and
+	// the only form it reads back without the field, and 2 for a v2
+	// ConditionGroup. See splitPipelineConditions.
+	Version    *int64          `json:"version,omitempty"`
 	Conditions json.RawMessage `json:"conditions,omitempty"`
 }
 
