@@ -52,9 +52,10 @@ func (r *PipelineDestinationResource) Schema(_ context.Context, _ resource.Schem
 		Description: "Manages an OpenObserve pipeline destination: an external endpoint a pipeline forwards " +
 			"records to through a `remote_stream` node.\n\n" +
 			"This is the same underlying object as `openobserve_alert_destination`, stored through the same " +
-			"endpoints, and the server tells them apart by one field: a destination carrying a template is an " +
-			"alert destination, and one without a template is a pipeline destination that alerts cannot use. " +
-			"They are separate resources here because that field decides what the object is for, and because " +
+			"endpoints, and the server tells them apart by the `module` query parameter sent on create and " +
+			"update, which this resource always sets to `pipeline`. Without it the server stores an alert " +
+			"destination, and a pipeline cannot send to it. " +
+			"They are separate resources here because that choice decides what the object is for, and because " +
 			"the rest of the alert surface, templates, email recipients and SNS, does not apply to a pipeline.\n\n" +
 			"The server refuses to delete a destination a pipeline still sends to. Referencing this resource's " +
 			"`name` from the pipeline's `remote_stream` node is what makes Terraform order the two correctly.",
@@ -125,8 +126,8 @@ func (r *PipelineDestinationResource) apiFromModel(ctx context.Context, model *P
 		Method:        model.Method.ValueString(),
 		SkipTLSVerify: model.SkipTLSVerify.ValueBool(),
 		Headers:       stringsFromMap(ctx, model.Headers, diags),
-		// Deliberately never a template: that field is what would turn this into
-		// an alert destination.
+		// Never a template: a pipeline destination has none. The client marks it
+		// as a pipeline destination with the module=pipeline query parameter.
 		DestinationTypeName: optString(model.DestinationType),
 		Metadata:            stringsFromMap(ctx, model.Metadata, diags),
 		Emails:              []string{},

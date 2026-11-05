@@ -133,9 +133,9 @@ func isFunctionAlreadyExists(err error) bool {
 // ---------------------------------------------------------------------------
 //
 // A pipeline destination is the same object as an alert destination, stored
-// through the same endpoints. The server decides which it is from one field: a
-// body carrying a template becomes an alert destination, a body without one
-// becomes a pipeline destination that alerts cannot use.
+// through the same endpoints. The server decides which it is from the `module`
+// query parameter on create and update: without `module=pipeline` it stores an
+// alert destination, which a pipeline's remote_stream node cannot send to.
 //
 // They are separate resources here because that single field changes what the
 // object is for, and because the rest of the alert destination surface (emails,
@@ -161,7 +161,8 @@ func (c *Client) CreatePipelineDestination(ctx context.Context, orgID string, re
 	if req.Emails == nil {
 		req.Emails = []string{}
 	}
-	return c.do(ctx, http.MethodPost, fmt.Sprintf("/api/%s/alerts/destinations", pathEscape(orgID)), req)
+	path := fmt.Sprintf("/api/%s/alerts/destinations?module=pipeline", pathEscape(orgID))
+	return c.do(ctx, http.MethodPost, path, req)
 }
 
 // UpdatePipelineDestination replaces an existing pipeline destination.
@@ -169,7 +170,7 @@ func (c *Client) UpdatePipelineDestination(ctx context.Context, orgID, name stri
 	if req.Emails == nil {
 		req.Emails = []string{}
 	}
-	path := fmt.Sprintf("/api/%s/alerts/destinations/%s", pathEscape(orgID), pathEscape(name))
+	path := fmt.Sprintf("/api/%s/alerts/destinations/%s?module=pipeline", pathEscape(orgID), pathEscape(name))
 	return c.do(ctx, http.MethodPut, path, req)
 }
 
