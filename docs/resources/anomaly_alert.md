@@ -149,7 +149,7 @@ output "checkout_volume_band" {
 - `detection_function_field` (String) Field the aggregation reads. With `filters` it is the stream field to aggregate; with `custom_sql` it is the query's output column that carries the value, for example `value`. Required for every `detection_function` except `count`, which it must not be set with.
 - `enabled` (Boolean) Whether the detector trains and runs. A disabled alert is neither trained nor evaluated.
 - `filters` (Attributes List) Row filters, ANDed together, for the filters query mode. Omit both `filters` and `custom_sql` to aggregate every row of the stream. Conflicts with `custom_sql`. (see [below for nested schema](#nestedatt--filters))
-- `folder_id` (String) Alert folder holding this anomaly alert. Changing it moves the alert.
+- `folder_id` (String) Alert folder holding this anomaly alert. Changing it moves the alert in place, through the same server call as moving it in the UI. On OpenObserve up to at least v1.2.0-rc1 that call does not move the alert's RBAC ownership record, so with RBAC enabled, folder-based permissions may still follow the old folder. Recreate the alert instead if that matters.
 - `org_id` (String) Organization the anomaly alert belongs to. Defaults to the provider's `org_id`.
 - `owner` (String) Email of the alert owner. Defaults to the account the provider authenticates as.
 - `priority` (Number) Triage priority from 1 (most urgent) to 5. Display metadata only.

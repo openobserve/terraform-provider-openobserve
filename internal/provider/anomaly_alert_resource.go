@@ -153,11 +153,14 @@ func (r *AnomalyAlertResource) Schema(_ context.Context, _ resource.SchemaReques
 				},
 			},
 			"folder_id": schema.StringAttribute{
-				Optional:    true,
-				Computed:    true,
-				Default:     stringdefault.StaticString("default"),
-				Description: "Alert folder holding this anomaly alert. Changing it moves the alert.",
-				Validators:  []validator.String{stringvalidator.LengthAtLeast(1)},
+				Optional: true,
+				Computed: true,
+				Default:  stringdefault.StaticString("default"),
+				Description: "Alert folder holding this anomaly alert. Changing it moves the alert in place, through the " +
+					"same server call as moving it in the UI. On OpenObserve up to at least v1.2.0-rc1 that call does " +
+					"not move the alert's RBAC ownership record, so with RBAC enabled, folder-based permissions may still " +
+					"follow the old folder. Recreate the alert instead if that matters.",
+				Validators: []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"name": schema.StringAttribute{
 				Required:    true,
@@ -326,7 +329,7 @@ func (r *AnomalyAlertResource) Schema(_ context.Context, _ resource.SchemaReques
 				Computed:      true,
 				Description:   "Email of the alert owner. Defaults to the account the provider authenticates as.",
 				Validators:    []validator.String{stringvalidator.LengthAtLeast(1)},
-				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				PlanModifiers: []planmodifier.String{keepStateWhenUnset{}},
 			},
 			"priority": schema.Int64Attribute{
 				Optional:    true,
@@ -339,33 +342,39 @@ func (r *AnomalyAlertResource) Schema(_ context.Context, _ resource.SchemaReques
 				Description: "Selection tags, lowercase, for example `prod` or `team:checkout`.",
 			},
 			"band_grouping": schema.StringAttribute{
-				Computed: true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.String{keepStateWhenUnset{}},
 				Description: "Slot grouping training chose: `weekend_hour` (weekday or weekend, by hour of day, from " +
 					"3 or more days of data) or `global`. Alerts trained by older builds may report `hour_of_week` or " +
 					"`hour_of_day` until they retrain. Null until trained.",
 			},
 			"band_k": schema.Float64Attribute{
-				Computed: true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.Float64{keepStateWhenUnset{}},
 				Description: "The model's k: the p99 training z-score, between 3 and 6, unless `alert_budget_per_day` " +
 					"has moved it. `band_width` overrides it when set. Null until trained.",
 			},
 			"training_data_start_us": schema.Int64Attribute{
-				Computed: true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.Int64{keepStateWhenUnset{}},
 				Description: "Start of the data the current model was trained on, in microseconds. Null until " +
 					"trained, and may be null in non-primary super-cluster regions.",
 			},
 			"training_data_end_us": schema.Int64Attribute{
-				Computed: true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.Int64{keepStateWhenUnset{}},
 				Description: "End of the data the current model was trained on, in microseconds. Null until " +
 					"trained, and may be null in non-primary super-cluster regions.",
 			},
 			"is_trained": schema.BoolAttribute{
-				Computed:    true,
-				Description: "Whether a trained model is in force.",
+				Computed:      true,
+				PlanModifiers: []planmodifier.Bool{keepStateWhenUnset{}},
+				Description:   "Whether a trained model is in force.",
 			},
 			"status": schema.StringAttribute{
-				Computed:    true,
-				Description: "Lifecycle status: `waiting`, `training`, `ready`, `failed` or `disabled`.",
+				Computed:      true,
+				PlanModifiers: []planmodifier.String{keepStateWhenUnset{}},
+				Description:   "Lifecycle status: `waiting`, `training`, `ready`, `failed` or `disabled`.",
 			},
 		},
 	}
@@ -437,6 +446,18 @@ func validateAnomalyConfig(ctx context.Context, config *AnomalyAlertResourceMode
 		}
 	}
 
+	if knownAndSet(config.DetectionFunctionField) {
+		field := config.DetectionFunctionField.ValueString()
+		if field != strings.TrimSpace(field) {
+			diags.AddAttributeError(
+				path.Root("detection_function_field"),
+				"detection_function_field has surrounding whitespace",
+				fmt.Sprintf("OpenObserve stores %q as written but reads it back trimmed. Write it as %q.",
+					field, strings.TrimSpace(field)),
+			)
+		}
+	}
+
 	if knownAndSet(config.DetectionFunction) && !config.DetectionFunctionField.IsUnknown() {
 		fn := config.DetectionFunction.ValueString()
 		hasField := !config.DetectionFunctionField.IsNull()
@@ -498,6 +519,20 @@ func (r *AnomalyAlertResource) Create(ctx context.Context, req resource.CreateRe
 		return
 	}
 
+	// A server older than the band settings accepts the request and drops
+	// them. Its existing configs show that before anything is written; with no
+	// config to judge by, the read-back below decides.
+	known, supported, err := r.client.AnomalyBandSettingsSupported(ctx, org)
+	if err != nil {
+		summary, detail := anomalyErrorDiag("creating", err)
+		resp.Diagnostics.AddError(summary, detail)
+		return
+	}
+	if known && !supported {
+		addBandSettingsError(&resp.Diagnostics)
+		return
+	}
+
 	anomalyID, err := r.client.CreateAnomalyConfig(ctx, org, body)
 	if err != nil {
 		summary, detail := anomalyErrorDiag("creating", err)
@@ -508,13 +543,34 @@ func (r *AnomalyAlertResource) Create(ctx context.Context, req resource.CreateRe
 	plan.OrgID = types.StringValue(org)
 	plan.AnomalyID = types.StringValue(anomalyID)
 	plan.ID = types.StringValue(anomalyResourceID(org, anomalyID))
-	// Save the ID first, so a failed read-back leaves a tracked resource
-	// rather than an orphan on the server.
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), plan.ID)...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("anomaly_id"), plan.AnomalyID)...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), plan.OrgID)...)
 
-	r.refresh(ctx, org, anomalyID, &plan, &resp.Diagnostics)
+	cfg, err := r.client.GetAnomalyConfig(ctx, org, anomalyID)
+	if err != nil || cfg == nil {
+		// Track what was created, so the failed read-back does not orphan it.
+		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), plan.ID)...)
+		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("anomaly_id"), plan.AnomalyID)...)
+		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), plan.OrgID)...)
+		if err != nil {
+			summary, detail := anomalyErrorDiag("reading", err)
+			resp.Diagnostics.AddError(summary, detail)
+		} else {
+			resp.Diagnostics.AddError("Anomaly alert not found after create",
+				fmt.Sprintf("Anomaly alert %q was not found in org %q after being created.", anomalyID, org))
+		}
+		return
+	}
+	if !cfg.HasBandSettings {
+		// Remove what this server cannot store, and keep nothing in state:
+		// a tainted resource would only be recreated into the same failure.
+		if delErr := r.client.DeleteAnomalyConfig(ctx, org, anomalyID); delErr != nil {
+			resp.Diagnostics.AddError("Error removing the anomaly alert after a failed create",
+				fmt.Sprintf("Anomaly alert %q in org %q could not be deleted: %v", anomalyID, org, delErr))
+		}
+		addBandSettingsError(&resp.Diagnostics)
+		return
+	}
+
+	applyAnomalyToModel(ctx, cfg, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -563,14 +619,12 @@ func (r *AnomalyAlertResource) Update(ctx context.Context, req resource.UpdateRe
 	}
 
 	org := requireOrg(r.client, plan.OrgID, &resp.Diagnostics)
-	body := anomalyWriteFromModel(ctx, &plan, false, &resp.Diagnostics)
+	body := anomalyUpdateBody(ctx, &plan, &state, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	anomalyID := state.AnomalyID.ValueString()
-	if plan.ScheduleInterval.Equal(state.ScheduleInterval) {
-		body.ScheduleInterval = ""
-	}
+	planned := plan
 
 	if err := r.client.UpdateAnomalyConfig(ctx, org, anomalyID, body); err != nil {
 		summary, detail := anomalyErrorDiag("updating", err)
@@ -585,7 +639,87 @@ func (r *AnomalyAlertResource) Update(ctx context.Context, req resource.UpdateRe
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	keepPlannedTrainingFields(&planned, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// anomalyUpdateBody is the update request for a plan. An unchanged
+// schedule_interval is left out, because the server resets the detection
+// trigger to run immediately whenever the field is sent.
+func anomalyUpdateBody(ctx context.Context, plan, state *AnomalyAlertResourceModel, diags *diag.Diagnostics) AnomalyConfigWriteAPI {
+	body := anomalyWriteFromModel(ctx, plan, false, diags)
+	if plan.ScheduleInterval.Equal(state.ScheduleInterval) {
+		body.ScheduleInterval = ""
+	}
+	return body
+}
+
+// keepPlannedTrainingFields holds the training state (the band, the training
+// span, status and is_trained) at the values the plan carried over from state.
+// An update never writes them, but training runs in the background and may
+// finish between plan and apply; reporting its result here would contradict
+// the plan. The next refresh picks it up.
+func keepPlannedTrainingFields(planned, got *AnomalyAlertResourceModel) {
+	if !planned.BandGrouping.IsUnknown() {
+		got.BandGrouping = planned.BandGrouping
+	}
+	if !planned.BandK.IsUnknown() {
+		got.BandK = planned.BandK
+	}
+	if !planned.TrainingDataStartUs.IsUnknown() {
+		got.TrainingDataStartUs = planned.TrainingDataStartUs
+	}
+	if !planned.TrainingDataEndUs.IsUnknown() {
+		got.TrainingDataEndUs = planned.TrainingDataEndUs
+	}
+	if !planned.IsTrained.IsUnknown() {
+		got.IsTrained = planned.IsTrained
+	}
+	if !planned.Status.IsUnknown() {
+		got.Status = planned.Status
+	}
+}
+
+// keepStateWhenUnset plans the prior value of an attribute the configuration
+// leaves unset, null included. UseStateForUnknown skips a null prior value, so
+// an alert imported without an owner would otherwise plan `owner` as unknown
+// on every update, and an untrained alert its training results.
+type keepStateWhenUnset struct{}
+
+func (keepStateWhenUnset) Description(context.Context) string {
+	return "Keeps the prior value, even null, when the configuration does not set one."
+}
+
+func (m keepStateWhenUnset) MarkdownDescription(ctx context.Context) string {
+	return m.Description(ctx)
+}
+
+func (keepStateWhenUnset) PlanModifyString(_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
+	if req.State.Raw.IsNull() || !req.ConfigValue.IsNull() || !req.PlanValue.IsUnknown() {
+		return
+	}
+	resp.PlanValue = req.StateValue
+}
+
+func (keepStateWhenUnset) PlanModifyFloat64(_ context.Context, req planmodifier.Float64Request, resp *planmodifier.Float64Response) {
+	if req.State.Raw.IsNull() || !req.ConfigValue.IsNull() || !req.PlanValue.IsUnknown() {
+		return
+	}
+	resp.PlanValue = req.StateValue
+}
+
+func (keepStateWhenUnset) PlanModifyInt64(_ context.Context, req planmodifier.Int64Request, resp *planmodifier.Int64Response) {
+	if req.State.Raw.IsNull() || !req.ConfigValue.IsNull() || !req.PlanValue.IsUnknown() {
+		return
+	}
+	resp.PlanValue = req.StateValue
+}
+
+func (keepStateWhenUnset) PlanModifyBool(_ context.Context, req planmodifier.BoolRequest, resp *planmodifier.BoolResponse) {
+	if req.State.Raw.IsNull() || !req.ConfigValue.IsNull() || !req.PlanValue.IsUnknown() {
+		return
+	}
+	resp.PlanValue = req.StateValue
 }
 
 func (r *AnomalyAlertResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -667,13 +801,17 @@ func requireBandSettings(cfg *AnomalyConfigAPI, diags *diag.Diagnostics) bool {
 	if cfg.HasBandSettings {
 		return true
 	}
+	addBandSettingsError(diags)
+	return false
+}
+
+func addBandSettingsError(diags *diag.Diagnostics) {
 	diags.AddError(
 		"OpenObserve is too old for openobserve_anomaly_alert",
 		"The server's anomaly alerts have no band settings (band_width, alert_direction, alert_window_*). "+
 			"This resource needs OpenObserve Enterprise v"+anomalyMinVersion+" or later. Upgrade the server, "+
 			"or remove the resource from the configuration.",
 	)
-	return false
 }
 
 // emptyAnomalyModel is a model whose collections are typed nulls, for import.

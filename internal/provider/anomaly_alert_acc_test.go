@@ -1,7 +1,9 @@
 package provider_test
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
@@ -19,13 +21,16 @@ import (
 // OpenTofu binary (TF_ACC_TERRAFORM_PATH). OPENOBSERVE_ANOMALY_STREAM names a
 // logs stream to read; the training test needs one with 21+ days of data.
 // OPENOBSERVE_TEST_PREFIX overrides the "tf_acc" prefix of created objects.
+//
+// The training test waits for a real training run, so it also needs
+// OPENOBSERVE_ANOMALY_TRAINING=1 and a longer timeout than `make testacc`:
+//
+//	TF_ACC=1 OPENOBSERVE_ANOMALY_TRAINING=1 OPENOBSERVE_ANOMALY_STREAM=app_logs \
+//	  go test ./internal/provider/ -run TestAccAnomalyAlertTraining -v -timeout 20m
 
-func anomalyAccPreCheck(t *testing.T) (prefix, stream string) {
-	t.Helper()
-	if os.Getenv("TF_ACC") == "" || os.Getenv("OPENOBSERVE_ENDPOINT") == "" {
-		t.Skip("set TF_ACC=1 and OPENOBSERVE_ENDPOINT to run acceptance tests")
-	}
-	// An open-source server has no anomaly detection routes and answers 404.
+// listAnomalyIDs returns the HTTP status of the anomaly detection list and
+// the IDs it holds, read straight from the API.
+func listAnomalyIDs() (int, map[string]bool, error) {
 	org := os.Getenv("OPENOBSERVE_ORG_ID")
 	if org == "" {
 		org = "default"
@@ -33,15 +38,60 @@ func anomalyAccPreCheck(t *testing.T) (prefix, stream string) {
 	req, err := http.NewRequest(http.MethodGet,
 		strings.TrimRight(os.Getenv("OPENOBSERVE_ENDPOINT"), "/")+"/api/"+org+"/anomaly_detection", nil)
 	if err != nil {
-		t.Fatal(err)
+		return 0, nil, err
 	}
 	req.SetBasicAuth(os.Getenv("OPENOBSERVE_USERNAME"), os.Getenv("OPENOBSERVE_PASSWORD"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close error is not actionable
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, nil, err
+	}
+	var rows []struct {
+		AnomalyID string `json:"anomaly_id"`
+	}
+	if err := json.Unmarshal(body, &rows); err != nil {
+		return resp.StatusCode, nil, err
+	}
+	ids := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		ids[row.AnomalyID] = true
+	}
+	return resp.StatusCode, ids, nil
+}
+
+// checkAnomalyAlertsDestroyed fails when an alert from the final state is
+// still listed, so a delete that reports success without deleting is caught.
+func checkAnomalyAlertsDestroyed(s *terraform.State) error {
+	status, ids, err := listAnomalyIDs()
+	if err != nil || status != http.StatusOK {
+		return fmt.Errorf("listing anomaly alerts after destroy: HTTP %d, %v", status, err)
+	}
+	for _, rs := range s.RootModule().Resources {
+		if rs.Type != "openobserve_anomaly_alert" {
+			continue
+		}
+		if id := rs.Primary.Attributes["anomaly_id"]; ids[id] {
+			return fmt.Errorf("anomaly alert %s still exists after destroy", id)
+		}
+	}
+	return nil
+}
+
+func anomalyAccPreCheck(t *testing.T) (prefix, stream string) {
+	t.Helper()
+	if os.Getenv("TF_ACC") == "" || os.Getenv("OPENOBSERVE_ENDPOINT") == "" {
+		t.Skip("set TF_ACC=1 and OPENOBSERVE_ENDPOINT to run acceptance tests")
+	}
+	// An open-source server has no anomaly detection routes and answers 404.
+	status, _, err := listAnomalyIDs()
+	if err != nil {
 		t.Fatalf("probing the anomaly detection API: %v", err)
 	}
-	_ = resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
+	if status == http.StatusNotFound {
 		t.Skip("anomaly detection needs OpenObserve Enterprise; this server has no anomaly_detection API")
 	}
 	prefix = os.Getenv("OPENOBSERVE_TEST_PREFIX")
@@ -99,6 +149,7 @@ func TestAccAnomalyAlert(t *testing.T) {
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             checkAnomalyAlertsDestroyed,
 		Steps: []resource.TestStep{
 			// Create with every band input.
 			{
@@ -207,12 +258,27 @@ func TestAccAnomalyAlert(t *testing.T) {
 
 // TestAccAnomalyAlertTraining creates an enabled alert, which starts
 // training, waits for it, and checks the computed band attributes populate on
-// refresh. It needs OPENOBSERVE_ANOMALY_STREAM with 21+ days of logs.
+// refresh. It runs only with OPENOBSERVE_ANOMALY_TRAINING=1 and
+// OPENOBSERVE_ANOMALY_STREAM naming a logs stream with 21+ days of data.
+//
+// The wait is bounded by the test binary's -timeout, less a margin for the
+// destroy: a timeout kills the process, and the alert would then be left
+// running on the server.
 func TestAccAnomalyAlertTraining(t *testing.T) {
 	prefix, stream := anomalyAccPreCheck(t)
-	if stream == "" {
-		t.Skip("set OPENOBSERVE_ANOMALY_STREAM to a logs stream with 21+ days of data")
+	if os.Getenv("OPENOBSERVE_ANOMALY_TRAINING") != "1" || stream == "" {
+		t.Skip("set OPENOBSERVE_ANOMALY_TRAINING=1 and OPENOBSERVE_ANOMALY_STREAM to a logs stream with 21+ days " +
+			"of data to run the training test")
 	}
+	const cleanupMargin = 90 * time.Second
+	waitUntil := time.Now().Add(10 * time.Minute)
+	if deadline, ok := t.Deadline(); ok && deadline.Add(-cleanupMargin).Before(waitUntil) {
+		waitUntil = deadline.Add(-cleanupMargin)
+	}
+	if time.Until(waitUntil) < time.Minute {
+		t.Skip("too little of the test timeout is left to wait for training; run with -timeout 20m")
+	}
+
 	name := fmt.Sprintf("%s_anomaly_train_%d", prefix, time.Now().UnixNano())
 	const addr = "openobserve_anomaly_alert.test"
 	config := strings.Replace(anomalyAccConfig(prefix, stream, name, ""),
@@ -221,20 +287,22 @@ func TestAccAnomalyAlertTraining(t *testing.T) {
 	trained := func(s *terraform.State) error {
 		attrs := s.RootModule().Resources[addr].Primary.Attributes
 		if attrs["is_trained"] != "true" {
-			return fmt.Errorf("not trained yet: status %q", attrs["status"])
+			return fmt.Errorf("not trained in the time the test timeout allows: status %q", attrs["status"])
 		}
 		return nil
 	}
 
+	// Each refresh step re-reads the alert. A step only waits while there is
+	// time left, so once the budget is spent the remaining steps run straight
+	// through to the final check and the destroy.
+	const poll = 15 * time.Second
 	done := false
 	steps := []resource.TestStep{{Config: config}}
-	// Each refresh step re-reads the alert; training on a few weeks of
-	// hourly buckets usually finishes within a minute.
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 40; i++ {
 		steps = append(steps, resource.TestStep{
 			PreConfig: func() {
-				if !done {
-					time.Sleep(15 * time.Second)
+				if !done && time.Until(waitUntil) > poll {
+					time.Sleep(poll)
 				}
 			},
 			RefreshState: true,
@@ -260,6 +328,7 @@ func TestAccAnomalyAlertTraining(t *testing.T) {
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             checkAnomalyAlertsDestroyed,
 		Steps:                    steps,
 	})
 }

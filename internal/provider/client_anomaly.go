@@ -140,16 +140,40 @@ type anomalyCreatedAPI struct {
 // errAnomalyUnsupported marks a server without the anomaly detection API.
 var errAnomalyUnsupported = errors.New("anomaly detection API not available")
 
-// anomalyRouteMissing reports whether err is the 404 an open-source server
-// answers for the anomaly detection collection route, which it does not have.
-// A 404 that names a config ("Anomaly config not found") is a missing object
-// on a server that has the API, so it is not this.
-func anomalyRouteMissing(err error) bool {
+// anomalyRouteMissing reports whether err is the 404 a server without the
+// anomaly detection API answers.
+//
+// An open-source server has no anomaly routes, and its catch-all answers any
+// unknown path with 404 "Organization not found", the same answer an
+// Enterprise server gives for an organization that does not exist. The body
+// cannot tell the two apart, so the edition in the public /config document
+// does. A 404 naming a config ("Anomaly config not found") is a missing object
+// on a server that has the API. When /config cannot be read the answer is
+// false, so the server's own error is reported rather than a guess.
+func (c *Client) anomalyRouteMissing(ctx context.Context, err error) bool {
 	var apiErr *apiError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
 		return false
 	}
-	return !strings.Contains(strings.ToLower(apiErr.Body), "anomaly config not found")
+	if strings.Contains(strings.ToLower(apiErr.Body), "anomaly config not found") {
+		return false
+	}
+	var cfg struct {
+		BuildType string `json:"build_type"`
+	}
+	if cfgErr := c.doJSON(ctx, http.MethodGet, "/config", nil, &cfg); cfgErr != nil || cfg.BuildType == "" {
+		return false
+	}
+	return cfg.BuildType != "enterprise"
+}
+
+// unsupportedOr wraps err as errAnomalyUnsupported when it comes from a
+// server without the anomaly detection API.
+func (c *Client) unsupportedOr(ctx context.Context, err error) error {
+	if c.anomalyRouteMissing(ctx, err) {
+		return fmt.Errorf("%w: %v", errAnomalyUnsupported, err)
+	}
+	return err
 }
 
 // anomalyErrorDiag turns an anomaly API error into a diagnostic that says what
@@ -177,10 +201,7 @@ func (c *Client) CreateAnomalyConfig(ctx context.Context, orgID string, req Anom
 	path := fmt.Sprintf("/api/%s/anomaly_detection", pathEscape(orgID))
 	var out anomalyCreatedAPI
 	if err := c.doJSON(ctx, http.MethodPost, path, req, &out); err != nil {
-		if anomalyRouteMissing(err) {
-			return "", fmt.Errorf("%w: %v", errAnomalyUnsupported, err)
-		}
-		return "", err
+		return "", c.unsupportedOr(ctx, err)
 	}
 	if out.AnomalyID == "" {
 		return "", fmt.Errorf("OpenObserve created the anomaly alert but returned no anomaly_id")
@@ -193,9 +214,10 @@ func (c *Client) GetAnomalyConfig(ctx context.Context, orgID, anomalyID string) 
 	path := fmt.Sprintf("/api/%s/anomaly_detection/%s", pathEscape(orgID), pathEscape(anomalyID))
 	var raw json.RawMessage
 	if err := c.doJSON(ctx, http.MethodGet, path, nil, &raw); err != nil {
-		if anomalyRouteMissing(err) {
-			return nil, fmt.Errorf("%w: %v", errAnomalyUnsupported, err)
+		if err := c.unsupportedOr(ctx, err); errors.Is(err, errAnomalyUnsupported) {
+			return nil, err
 		}
+		// Any other 404, the config's or its organization's, means it is gone.
 		if isNotFound(err) {
 			return nil, nil
 		}
@@ -272,10 +294,24 @@ func (c *Client) ListAnomalyConfigs(ctx context.Context, orgID string) ([]Anomal
 	path := fmt.Sprintf("/api/%s/anomaly_detection", pathEscape(orgID))
 	var out []AnomalyConfigAPI
 	if err := c.doJSON(ctx, http.MethodGet, path, nil, &out); err != nil {
-		if anomalyRouteMissing(err) {
-			return nil, fmt.Errorf("%w: %v", errAnomalyUnsupported, err)
-		}
-		return nil, err
+		return nil, c.unsupportedOr(ctx, err)
 	}
 	return out, nil
+}
+
+// AnomalyBandSettingsSupported reports whether the server stores the band
+// settings, judged from the configs it already lists: a server older than
+// them leaves their columns out. known is false when the organization has no
+// config to judge by.
+func (c *Client) AnomalyBandSettingsSupported(ctx context.Context, orgID string) (known, supported bool, err error) {
+	path := fmt.Sprintf("/api/%s/anomaly_detection", pathEscape(orgID))
+	var rows []map[string]json.RawMessage
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &rows); err != nil {
+		return false, false, c.unsupportedOr(ctx, err)
+	}
+	if len(rows) == 0 {
+		return false, false, nil
+	}
+	_, supported = rows[0]["alert_window_fire_pct"]
+	return true, supported, nil
 }

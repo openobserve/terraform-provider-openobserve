@@ -2003,15 +2003,37 @@ func TestIntegrationAnomalyAlertLifecycle(t *testing.T) {
 	}
 }
 
+// anomalyTrainingWait returns how long a training test may wait: at most limit,
+// and never so long that the test binary's -timeout kills the process before
+// t.Cleanup has deleted the config. It skips when too little time is left.
+func anomalyTrainingWait(t *testing.T, limit time.Duration) time.Time {
+	t.Helper()
+	const cleanupMargin = time.Minute
+	deadline := time.Now().Add(limit)
+	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-cleanupMargin).Before(deadline) {
+		deadline = testDeadline.Add(-cleanupMargin)
+	}
+	if time.Until(deadline) < time.Minute {
+		t.Skip("too little of the test timeout is left to wait for training; run with -timeout 20m")
+	}
+	return deadline
+}
+
 // TestIntegrationAnomalyAlertTraining trains a config and checks the computed
-// band attributes are filled. It reads at least 21 days of history, so it runs
-// only when OPENOBSERVE_ANOMALY_STREAM names a logs stream that has them.
+// band attributes are filled. Training reads at least 21 days of history and
+// takes a while, so the test runs only with OPENOBSERVE_ANOMALY_TRAINING=1 and
+// OPENOBSERVE_ANOMALY_STREAM naming a logs stream that has that history:
+//
+//	OPENOBSERVE_ANOMALY_TRAINING=1 OPENOBSERVE_ANOMALY_STREAM=app_logs \
+//	  go test ./internal/provider/ -run TestIntegrationAnomalyAlertTraining -v -timeout 20m
 func TestIntegrationAnomalyAlertTraining(t *testing.T) {
 	c := integrationClient(t)
-	if os.Getenv("OPENOBSERVE_ANOMALY_STREAM") == "" {
-		t.Skip("set OPENOBSERVE_ANOMALY_STREAM to a logs stream with 21+ days of data to run the training test")
+	if os.Getenv("OPENOBSERVE_ANOMALY_TRAINING") != "1" || os.Getenv("OPENOBSERVE_ANOMALY_STREAM") == "" {
+		t.Skip("set OPENOBSERVE_ANOMALY_TRAINING=1 and OPENOBSERVE_ANOMALY_STREAM to a logs stream with 21+ days " +
+			"of data to run the training test")
 	}
 	requireAnomalyAPI(t, c)
+	deadline := anomalyTrainingWait(t, 10*time.Minute)
 	ctx := context.Background()
 	org := c.DefaultOrgID()
 	name := uniqueName(anomalyIntegrationPrefix() + "_anomaly_train")
@@ -2026,10 +2048,16 @@ func TestIntegrationAnomalyAlertTraining(t *testing.T) {
 	t.Cleanup(func() {
 		if err := c.DeleteAnomalyConfig(ctx, org, id); err != nil {
 			t.Errorf("DeleteAnomalyConfig: %v", err)
+			// Never leave an enabled config running on the server.
+			disabled := body
+			disabled.Enabled = false
+			disabled.StreamName, disabled.StreamType = "", ""
+			if err := c.UpdateAnomalyConfig(ctx, org, id, disabled); err != nil {
+				t.Errorf("disabling anomaly config %s that could not be deleted: %v", id, err)
+			}
 		}
 	})
 
-	deadline := time.Now().Add(10 * time.Minute)
 	var got *AnomalyConfigAPI
 	for {
 		got, err = c.GetAnomalyConfig(ctx, org, id)
@@ -2042,8 +2070,8 @@ func TestIntegrationAnomalyAlertTraining(t *testing.T) {
 		if got.Status == "failed" {
 			t.Fatalf("training failed: %v", stringFromPtr(got.LastError))
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("not trained after 10 minutes: status %q", got.Status)
+		if time.Until(deadline) < 15*time.Second {
+			t.Fatalf("not trained in the time the test timeout allows: status %q", got.Status)
 		}
 		time.Sleep(15 * time.Second)
 	}

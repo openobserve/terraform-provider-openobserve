@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -486,16 +487,27 @@ func TestAnomalyClientAgainstServer(t *testing.T) {
 
 // TestAnomalyCreateOnOpenSource checks the open-source answer, a 404 for a
 // route it does not have, becomes a diagnostic naming the missing edition.
-func TestAnomalyCreateOnOpenSource(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+// orgNotFoundServer answers every API path as both editions answer a path
+// they cannot serve, 404 "Organization not found", and /config with the
+// given edition.
+func orgNotFoundServer(t *testing.T, buildType string) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/config" {
+			_, _ = w.Write([]byte(`{"build_type":"` + buildType + `"}`))
+			return
+		}
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte("Organization not found"))
 	}))
 	t.Cleanup(srv.Close)
-	c := newClient(srv.URL, "u", "p", "default")
+	return newClient(srv.URL, "u", "p", "default")
+}
+
+func TestAnomalyCreateOnOpenSource(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	c := orgNotFoundServer(t, "opensource")
 
 	m := anomalyModel()
 	var diags diag.Diagnostics
@@ -553,5 +565,153 @@ func TestAnomalyDeletedBehindRBAC(t *testing.T) {
 	}
 	if err := c.DeleteAnomalyConfig(ctx, "default", "present"); err == nil {
 		t.Error("a 403 deleting a config that still exists was swallowed")
+	}
+}
+
+// TestAnomalyMissingOrganizationOnEnterprise checks that an Enterprise
+// server's 404 for an organization that does not exist is not reported as a
+// missing edition: create shows the server's answer, and a read treats the
+// alert as gone.
+func TestAnomalyMissingOrganizationOnEnterprise(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	c := orgNotFoundServer(t, "enterprise")
+
+	m := anomalyModel()
+	var diags diag.Diagnostics
+	_, err := c.CreateAnomalyConfig(ctx, "nope", anomalyWriteFromModel(ctx, &m, true, &diags))
+	if err == nil || errors.Is(err, errAnomalyUnsupported) || !strings.Contains(err.Error(), "Organization not found") {
+		t.Fatalf("create in a missing organization: %v", err)
+	}
+	summary, _ := anomalyErrorDiag("creating", err)
+	if strings.Contains(summary, "Enterprise") {
+		t.Errorf("missing organization reported as %q", summary)
+	}
+	if got, err := c.GetAnomalyConfig(ctx, "nope", "abc"); err != nil || got != nil {
+		t.Errorf("read in a missing organization = %+v, %v; want nil, nil", got, err)
+	}
+	if _, _, err := c.AnomalyBandSettingsSupported(ctx, "nope"); errors.Is(err, errAnomalyUnsupported) {
+		t.Errorf("band check in a missing organization reported a missing edition: %v", err)
+	}
+}
+
+func TestAnomalyBandSettingsSupported(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name, body       string
+		known, supported bool
+	}{
+		{"no configs", `[]`, false, false},
+		{"current server", `[{"anomaly_id":"a","alert_window_fire_pct":null}]`, true, true},
+		{"older server", `[{"anomaly_id":"a","threshold":97}]`, true, false},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		c := newClient(srv.URL, "u", "p", "default")
+		known, supported, err := c.AnomalyBandSettingsSupported(ctx, "default")
+		srv.Close()
+		if err != nil || known != tc.known || supported != tc.supported {
+			t.Errorf("%s: known %v, supported %v, err %v; want %v, %v", tc.name, known, supported, err, tc.known, tc.supported)
+		}
+	}
+}
+
+func TestAnomalyDetectionFieldWhitespace(t *testing.T) {
+	t.Parallel()
+
+	m := anomalyModel()
+	m.DetectionFunction = types.StringValue("avg")
+	m.DetectionFunctionField = types.StringValue(" latency ")
+	if got := diagSummaries(validateAnomaly(t, m)); !strings.Contains(got, "surrounding whitespace") {
+		t.Fatalf("whitespace around detection_function_field was not rejected:\n%s", got)
+	}
+	m.DetectionFunctionField = types.StringValue("latency")
+	if diags := validateAnomaly(t, m); diags.HasError() {
+		t.Fatalf("a trimmed field was rejected:\n%s", diagSummaries(diags))
+	}
+}
+
+func TestAnomalyUpdateBodyScheduleInterval(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	state := anomalyModel()
+	plan := anomalyModel()
+	plan.Description = types.StringValue("only the description changed")
+	var diags diag.Diagnostics
+	body := anomalyUpdateBody(ctx, &plan, &state, &diags)
+	encoded, _ := json.Marshal(body)
+	if strings.Contains(string(encoded), "schedule_interval") {
+		t.Errorf("an unchanged schedule_interval was sent: %s", encoded)
+	}
+
+	plan.ScheduleInterval = types.StringValue("30m")
+	body = anomalyUpdateBody(ctx, &plan, &state, &diags)
+	encoded, _ = json.Marshal(body)
+	if !strings.Contains(string(encoded), `"schedule_interval":"30m"`) {
+		t.Errorf("a changed schedule_interval was not sent: %s", encoded)
+	}
+}
+
+// TestAnomalyOwnerPlanForNullOwnerImport covers an alert imported without an
+// owner: an update must plan the prior null, not unknown, so the plan stays
+// quiet and the null read back after apply matches it.
+func TestAnomalyOwnerPlanForNullOwnerImport(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	s := anomalySchema(t)
+	prior := anomalyModel()
+	prior.AnomalyID = types.StringValue("abc")
+	state := tfsdk.State{Schema: s, Raw: tftypes.NewValue(s.Type().TerraformType(ctx), nil)}
+	if diags := state.Set(ctx, &prior); diags.HasError() {
+		t.Fatalf("state: %+v", diags)
+	}
+
+	run := func(st tfsdk.State, config, planValue types.String) types.String {
+		req := planmodifier.StringRequest{
+			Path:        path.Root("owner"),
+			State:       st,
+			StateValue:  types.StringNull(),
+			ConfigValue: config,
+			PlanValue:   planValue,
+		}
+		resp := &planmodifier.StringResponse{PlanValue: req.PlanValue}
+		keepStateWhenUnset{}.PlanModifyString(ctx, req, resp)
+		return resp.PlanValue
+	}
+
+	if got := run(state, types.StringNull(), types.StringUnknown()); !got.IsNull() {
+		t.Errorf("update with a null prior owner planned %v, want null", got)
+	}
+	if got := run(state, types.StringValue("a@example.com"), types.StringValue("a@example.com")); got.ValueString() != "a@example.com" {
+		t.Errorf("a configured owner was replaced: %v", got)
+	}
+	create := tfsdk.State{Schema: s, Raw: tftypes.NewValue(s.Type().TerraformType(ctx), nil)}
+	if got := run(create, types.StringNull(), types.StringUnknown()); !got.IsUnknown() {
+		t.Errorf("create planned %v, want unknown so the server can pick the owner", got)
+	}
+}
+
+func TestKeepPlannedTrainingFields(t *testing.T) {
+	t.Parallel()
+
+	planned := anomalyModel()
+	planned.BandK = types.Float64Value(4)
+	planned.Status = types.StringValue("training")
+	planned.TrainingDataEndUs = types.Int64Unknown()
+	got := anomalyModel()
+	got.BandK = types.Float64Value(5)
+	got.Status = types.StringValue("ready")
+	got.TrainingDataEndUs = types.Int64Value(200)
+	keepPlannedTrainingFields(&planned, &got)
+	if got.BandK.ValueFloat64() != 4 || got.Status.ValueString() != "training" {
+		t.Errorf("planned training state was not kept: band_k %v, status %v", got.BandK, got.Status)
+	}
+	if got.TrainingDataEndUs.ValueInt64() != 200 {
+		t.Errorf("an unknown planned value was not filled from the server: %v", got.TrainingDataEndUs)
 	}
 }
