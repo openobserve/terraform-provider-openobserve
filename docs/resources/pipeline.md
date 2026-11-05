@@ -182,7 +182,7 @@ A stream can be the source of only one realtime pipeline. A second one is reject
 - `node` (Block List) One node of the graph. At least two nodes are required, and every node needs to be reachable from the input node through `edge` blocks. (see [below for nested schema](#nestedblock--node))
 - `org_id` (String) Organization the pipeline belongs to. Defaults to the provider's `org_id`.
 - `source_type` (String) How the pipeline is triggered. Only `realtime` is supported by this provider today: records are processed as they are ingested into `stream_name`.
-- `stream_type` (String) Type of the source stream.
+- `stream_type` (String) Type of the source stream. When omitted, it is taken from the `stream_type` of the first `node` (the source node) if that node sets one, and is `logs` otherwise. The server always uses the first node's stream as the pipeline source, so the two must agree.
 
 ### Read-Only
 

@@ -145,11 +145,13 @@ func (r *PipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 					"*A realtime pipeline with same source stream already exists*.",
 			},
 			"stream_type": schema.StringAttribute{
-				Optional:    true,
-				Computed:    true,
-				Default:     stringdefault.StaticString("logs"),
-				Validators:  []validator.String{stringvalidator.OneOf("logs", "metrics", "traces")},
-				Description: "Type of the source stream.",
+				Optional:      true,
+				Computed:      true,
+				Validators:    []validator.String{stringvalidator.OneOf("logs", "metrics", "traces")},
+				PlanModifiers: []planmodifier.String{pipelineStreamTypeFromSourceNode{}},
+				Description: "Type of the source stream. When omitted, it is taken from the `stream_type` of the " +
+					"first `node` (the source node) if that node sets one, and is `logs` otherwise. The server " +
+					"always uses the first node's stream as the pipeline source, so the two must agree.",
 			},
 			"version": schema.Int64Attribute{
 				Computed:    true,
@@ -298,6 +300,30 @@ func (r *PipelineResource) ValidateConfig(ctx context.Context, req resource.Vali
 		)
 	}
 
+	// The server replaces the pipeline source with the first node's stream
+	// (Pipeline::validate in OpenObserve), so a different stream_name or
+	// stream_type here would only surface later as an inconsistent result
+	// after apply. Catch it at plan time instead.
+	if len(config.Nodes) > 0 && config.Nodes[0].Type.ValueString() == "stream" {
+		first := config.Nodes[0]
+		firstPath := path.Root("node").AtListIndex(0)
+		if knownAndSet(config.StreamName) && knownAndSet(first.StreamName) &&
+			config.StreamName.ValueString() != first.StreamName.ValueString() {
+			resp.Diagnostics.AddAttributeError(firstPath.AtName("stream_name"), "Source node does not match stream_name",
+				fmt.Sprintf("The first node reads stream %q but the pipeline's `stream_name` is %q. OpenObserve "+
+					"uses the first node's stream as the pipeline source, so they must be the same.",
+					first.StreamName.ValueString(), config.StreamName.ValueString()))
+		}
+		if knownAndSet(config.StreamType) && knownAndSet(first.StreamType) &&
+			config.StreamType.ValueString() != first.StreamType.ValueString() {
+			resp.Diagnostics.AddAttributeError(firstPath.AtName("stream_type"), "Source node does not match stream_type",
+				fmt.Sprintf("The first node's `stream_type` is %q but the pipeline's `stream_type` is %q. OpenObserve "+
+					"uses the first node's stream as the pipeline source, so they must be the same. Omit the "+
+					"pipeline's `stream_type` to take it from the node.",
+					first.StreamType.ValueString(), config.StreamType.ValueString()))
+		}
+	}
+
 	// Every edge endpoint has to name a declared node. Only check this once all
 	// the ids are known, since an unknown id cannot be matched.
 	if len(ids) == len(config.Nodes) {
@@ -318,6 +344,51 @@ func (r *PipelineResource) ValidateConfig(ctx context.Context, req resource.Vali
 			}
 		}
 	}
+}
+
+// pipelineStreamTypeFromSourceNode fills in an unset pipeline stream_type.
+//
+// OpenObserve takes the pipeline source from the first node, so a fixed
+// "logs" default broke any pipeline whose source node reads a metrics or
+// traces stream: the server answered with the node's type and Terraform
+// reported an inconsistent result after apply. Use the first node's
+// stream_type when it has one, and "logs" otherwise.
+type pipelineStreamTypeFromSourceNode struct{}
+
+func (m pipelineStreamTypeFromSourceNode) Description(_ context.Context) string {
+	return "Defaults to the first node's stream_type, or \"logs\"."
+}
+
+func (m pipelineStreamTypeFromSourceNode) MarkdownDescription(ctx context.Context) string {
+	return m.Description(ctx)
+}
+
+func (m pipelineStreamTypeFromSourceNode) PlanModifyString(ctx context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
+	if !req.ConfigValue.IsNull() {
+		return
+	}
+
+	var nodes []PipelineNodeModel
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("node"), &nodes)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	resp.PlanValue = pipelineSourceStreamType(nodes)
+}
+
+// pipelineSourceStreamType is the stream type the server will report for a
+// pipeline whose stream_type is not configured.
+func pipelineSourceStreamType(nodes []PipelineNodeModel) types.String {
+	if len(nodes) > 0 {
+		first := nodes[0]
+		if first.Type.IsUnknown() || first.StreamType.IsUnknown() {
+			return types.StringUnknown()
+		}
+		if first.Type.ValueString() == "stream" && !first.StreamType.IsNull() {
+			return first.StreamType
+		}
+	}
+	return types.StringValue("logs")
 }
 
 func requirePipelineAttr(resp *resource.ValidateConfigResponse, nodePath path.Path, v types.String, attr, nodeType string) {

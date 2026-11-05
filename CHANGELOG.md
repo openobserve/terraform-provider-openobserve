@@ -39,6 +39,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list. The same comparison serves alert `conditions`. A server change that
   alters the filter is still reported.
 
+- **A pipeline reading a metrics or traces stream failed to apply.**
+  `openobserve_pipeline.stream_type` defaulted to `logs`, but OpenObserve
+  takes the pipeline source from the first node, so a pipeline whose source
+  node reads a metrics stream came back as `metrics`
+  ([#14](https://github.com/openobserve/terraform-provider-openobserve/issues/14)):
+
+  ```
+  Error: Provider produced inconsistent result after apply
+  .stream_type: was cty.StringVal("logs"), but now cty.StringVal("metrics").
+  ```
+
+  When `stream_type` is not set it now comes from the first node's
+  `stream_type`, and is still `logs` if that node does not set one. A
+  pipeline-level `stream_name` or `stream_type` that disagrees with the first
+  node is now rejected at plan time instead of failing after apply.
+
 ## [1.4.2] - 2026-10-01
 
 ### Fixed
