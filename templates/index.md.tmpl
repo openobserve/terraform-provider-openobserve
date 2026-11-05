@@ -55,6 +55,8 @@ resource "openobserve_stream" "team_logs" {
 Custom roles, groups, and the permission resource list require OpenObserve
 Enterprise with OpenFGA enabled. Against an open-source deployment those
 resources return a diagnostic saying so, rather than an opaque HTTP 403.
+`openobserve_anomaly_alert` requires OpenObserve Enterprise v1.1.0 or later,
+and also fails with a diagnostic saying so against an open-source server.
 Everything else, including SLOs, works on both editions.
 
 {{ .SchemaMarkdown | trimspace }}

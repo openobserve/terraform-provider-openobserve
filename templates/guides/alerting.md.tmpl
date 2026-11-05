@@ -323,6 +323,43 @@ data "openobserve_composite_alert_references" "error_rate" {
 `ZO_ALERT_COMPOSITE_WRITES_ENABLED=false`, and composites are unavailable
 entirely on super-cluster deployments. Both surface as a clear error on apply.
 
+## Anomaly alerts
+
+An anomaly alert needs no threshold. `openobserve_anomaly_alert` trains on at
+least 21 days of a stream's history and then flags each `histogram_interval`
+bucket whose value leaves the band `expected ± k·σ`. It is a separate resource
+because OpenObserve stores it as an anomaly detection config, not as a v2 alert.
+It requires **OpenObserve Enterprise v1.1.0 or later**.
+
+```hcl
+resource "openobserve_anomaly_alert" "checkout_volume" {
+  name        = "checkout_volume"
+  stream_name = "app_logs"
+  filters     = [{ field = "service", operator = "=", value = "checkout" }]
+
+  detection_function       = "count"
+  histogram_interval       = "5m"
+  schedule_interval        = "15m"
+  detection_window_seconds = 3600
+
+  alert_direction          = "above" # deliver rises only
+  alert_window_buckets     = 4       # fire when 3 of the last 4 buckets
+  alert_window_fire_pct    = 75      # are out of band, and recover when
+  alert_window_recover_pct = 50      # fewer than half of them are
+
+  alert_destinations = [openobserve_alert_destination.slack.name]
+}
+```
+
+k comes from training (between 3 and 6, reported as `band_k`) unless you set
+`band_width` to fix it, or `alert_budget_per_day` to let OpenObserve move it to
+hold a daily number of alerts (`band_k` then reports the moved k, which can
+leave that range). The two cannot be combined, which is caught at
+plan time. Changing the band and window settings takes effect on the next run
+without retraining. `band_grouping`, `band_k` and the training span are filled
+by training, so they are null right after the first apply; a later refresh
+picks them up.
+
 ## Scheduling
 
 By default an alert runs every `frequency` minutes over a `period`-minute
@@ -388,3 +425,7 @@ deliberately leaves the folder alone, so the provider issues a separate move.
 ### Composite alerts
 
 {{ tffile "examples/resources/openobserve_composite_alert/resource.tf" }}
+
+### Anomaly alerts
+
+{{ tffile "examples/resources/openobserve_anomaly_alert/resource.tf" }}
