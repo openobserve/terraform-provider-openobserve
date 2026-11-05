@@ -375,3 +375,67 @@ func TestPipelineValidateConfigConditions(t *testing.T) {
 		})
 	}
 }
+
+// TestPipelineModifyPlanRechecksConditions covers a v2 document that is
+// unknown when the configuration is validated, as jsonencode() of another
+// resource's output is, and turns out to carry a key the server drops. Plan
+// time is the last chance for a clear error; after it, the apply would end in
+// "Provider produced inconsistent result".
+func TestPipelineModifyPlanRechecksConditions(t *testing.T) {
+	ctx := context.Background()
+	bad := v2Configured[:len(v2Configured)-len(`"version":2}`)]
+	bad = strings.Replace(bad, `"operator":"Contains"`, `"ignoreCase":true,"operator":"Contains"`, 1) + `"version":2}`
+
+	withConditions := func(c types.String) PipelineResourceModel {
+		m := metricsPipeline()
+		m.Nodes = append(m.Nodes[:1], PipelineNodeModel{
+			ID: types.StringValue("filter"), Type: types.StringValue("condition"), IOType: types.StringNull(),
+			PositionX: types.Float64Null(), PositionY: types.Float64Null(),
+			StreamName: types.StringNull(), StreamType: types.StringNull(),
+			FunctionName: types.StringNull(), AfterFlatten: types.BoolNull(),
+			DestinationName: types.StringNull(), Conditions: c,
+		}, m.Nodes[1])
+		m.Edges = []PipelineEdgeModel{
+			{From: types.StringValue("in"), To: types.StringValue("filter")},
+			{From: types.StringValue("filter"), To: types.StringValue("out")},
+		}
+		return m
+	}
+	modifyPlan := func(model PipelineResourceModel) *resource.ModifyPlanResponse {
+		t.Helper()
+		config := pipelineConfig(t, model)
+		plan := tfsdk.Plan(config)
+		resp := &resource.ModifyPlanResponse{Plan: plan}
+		(&PipelineResource{}).ModifyPlan(ctx, resource.ModifyPlanRequest{Config: config, Plan: plan}, resp)
+		return resp
+	}
+
+	// Unknown at validate time: nothing to check yet.
+	if resp := validatePipeline(t, withConditions(types.StringUnknown())); resp.Diagnostics.HasError() {
+		t.Fatalf("validate with unknown conditions: %v", resp.Diagnostics)
+	}
+	if resp := modifyPlan(withConditions(types.StringUnknown())); resp.Diagnostics.HasError() {
+		t.Fatalf("plan with unknown conditions: %v", resp.Diagnostics)
+	}
+
+	// Known at plan time with a dropped key: a clear error on the attribute.
+	resp := modifyPlan(withConditions(types.StringValue(bad)))
+	errs := resp.Diagnostics.Errors()
+	if len(errs) != 1 || errs[0].Summary() != "Invalid conditions" || !strings.Contains(errs[0].Detail(), "`ignoreCase`") {
+		t.Fatalf("diagnostics = %v, want one Invalid conditions error naming ignoreCase", errs)
+	}
+
+	// Known and valid: no error.
+	if resp := modifyPlan(withConditions(types.StringValue(v2Configured))); resp.Diagnostics.HasError() {
+		t.Fatalf("plan with valid conditions: %v", resp.Diagnostics)
+	}
+
+	// Destroy: no plan to check.
+	config := pipelineConfig(t, withConditions(types.StringValue(bad)))
+	nullPlan := tfsdk.Plan{Schema: config.Schema, Raw: tftypes.NewValue(config.Schema.Type().TerraformType(ctx), nil)}
+	destroy := &resource.ModifyPlanResponse{Plan: nullPlan}
+	(&PipelineResource{}).ModifyPlan(ctx, resource.ModifyPlanRequest{Plan: nullPlan}, destroy)
+	if destroy.Diagnostics.HasError() {
+		t.Fatalf("destroy plan: %v", destroy.Diagnostics)
+	}
+}

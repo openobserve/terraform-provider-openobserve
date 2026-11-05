@@ -23,6 +23,7 @@ var (
 	_ resource.ResourceWithConfigure      = &PipelineResource{}
 	_ resource.ResourceWithImportState    = &PipelineResource{}
 	_ resource.ResourceWithValidateConfig = &PipelineResource{}
+	_ resource.ResourceWithModifyPlan     = &PipelineResource{}
 )
 
 // pipelineNodeTypes are the node kinds the provider models.
@@ -292,19 +293,8 @@ func (r *PipelineResource) ValidateConfig(ctx context.Context, req resource.Vali
 			requirePipelineAttr(resp, nodePath, node.DestinationName, "destination_name", "remote_stream")
 		case "condition":
 			requirePipelineAttr(resp, nodePath, node.Conditions, "conditions", "condition")
-			if knownAndSet(node.Conditions) {
-				if problem := pipelineConditionsProblem(node.Conditions.ValueString()); problem != "" {
-					resp.Diagnostics.AddAttributeError(nodePath.AtName("conditions"), "Invalid conditions", problem)
-				}
-			}
 		}
-		// Only a condition node sends its conditions, so on any other node they
-		// would be dropped and read back as null.
-		if node.Type.ValueString() != "condition" && knownAndSet(node.Conditions) {
-			resp.Diagnostics.AddAttributeError(nodePath.AtName("conditions"), "Conditions on a non-condition node",
-				fmt.Sprintf("`conditions` applies only to a `condition` node, and this node is a `%s` node.",
-					node.Type.ValueString()))
-		}
+		checkPipelineNodeConditions(node, nodePath, &resp.Diagnostics)
 	}
 
 	if len(config.Nodes) > 0 && len(config.Nodes) < 2 {
@@ -364,6 +354,53 @@ func (r *PipelineResource) ValidateConfig(ctx context.Context, req resource.Vali
 				}
 			}
 		}
+	}
+}
+
+// checkPipelineNodeConditions checks a node's `conditions` once both it and
+// the node type are known, and leaves anything still unknown for a later
+// check.
+func checkPipelineNodeConditions(node PipelineNodeModel, nodePath path.Path, diags *diag.Diagnostics) {
+	if !knownAndSet(node.Type) || !knownAndSet(node.Conditions) {
+		return
+	}
+	// Only a condition node sends its conditions, so on any other node they
+	// would be dropped and read back as null.
+	if node.Type.ValueString() != "condition" {
+		diags.AddAttributeError(nodePath.AtName("conditions"), "Conditions on a non-condition node",
+			fmt.Sprintf("`conditions` applies only to a `condition` node, and this node is a `%s` node.",
+				node.Type.ValueString()))
+		return
+	}
+	if problem := pipelineConditionsProblem(node.Conditions.ValueString()); problem != "" {
+		diags.AddAttributeError(nodePath.AtName("conditions"), "Invalid conditions", problem)
+	}
+}
+
+// ModifyPlan repeats the `conditions` checks once every value is known.
+// ValidateConfig has to skip a document that is unknown until apply, for
+// example one built with jsonencode() from another resource's output, and if
+// it then carries a key the server drops, the apply ends in "Provider produced
+// inconsistent result" instead of a clear message. Terraform plans again with
+// the values known before it applies, which is where this catches it.
+func (r *PipelineResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+	// Read the node list on its own: a `dynamic "node"` whose for_each is
+	// unknown plans the whole list as unknown, which a slice cannot hold.
+	var nodeList types.List
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("node"), &nodeList)...)
+	if resp.Diagnostics.HasError() || !knownAndSet(nodeList) {
+		return
+	}
+	var nodes []PipelineNodeModel
+	resp.Diagnostics.Append(nodeList.ElementsAs(ctx, &nodes, false)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	for i, node := range nodes {
+		checkPipelineNodeConditions(node, path.Root("node").AtListIndex(i), &resp.Diagnostics)
 	}
 }
 
