@@ -953,7 +953,7 @@ func (r *AlertResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	state.OrgID = types.StringValue(org)
 	state.ID = types.StringValue(alertResourceID(org, alertID))
 	r.applyAlertToModel(ctx, alert, &state, &resp.Diagnostics)
-	r.refreshFolder(ctx, org, alertID, &state)
+	r.refreshFolder(ctx, org, alertID, &state, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -1205,35 +1205,48 @@ func (r *AlertResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 	}
 }
 
-// ImportState supports: terraform import openobserve_alert.example default/2abcXYZ
+// ImportState supports:
+//
+//	terraform import openobserve_alert.example default/2abcXYZ
+//	terraform import openobserve_alert.example default/my_folder/2abcXYZ
+//
+// The folder in the three-part form is only where the lookup starts; the
+// folder the server reports wins.
 func (r *AlertResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	parts := strings.SplitN(req.ID, "/", 2)
-	if len(parts) != 2 {
+	parts := strings.Split(req.ID, "/")
+	var org, folderID, alertID string
+	switch {
+	case len(parts) == 2 && parts[0] != "" && parts[1] != "":
+		org, folderID, alertID = parts[0], "default", parts[1]
+	case len(parts) == 3 && parts[0] != "" && parts[1] != "" && parts[2] != "":
+		org, folderID, alertID = parts[0], parts[1], parts[2]
+	default:
 		resp.Diagnostics.AddError(
 			"Invalid import ID",
-			"Import ID must be `{org_id}/{alert_id}`, for example `default/2abcXYZ`.",
+			"Import ID must be `{org_id}/{alert_id}` or `{org_id}/{folder_id}/{alert_id}`, "+
+				"for example `default/2abcXYZ` or `default/my_folder/2abcXYZ`.",
 		)
 		return
 	}
 
-	alert, err := r.client.GetAlert(ctx, parts[0], parts[1])
+	alert, err := r.client.GetAlert(ctx, org, alertID)
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading alert during import", err.Error())
 		return
 	}
 	if alert == nil {
-		resp.Diagnostics.AddError("Alert not found", fmt.Sprintf("Alert %q not found in org %q.", parts[1], parts[0]))
+		resp.Diagnostics.AddError("Alert not found", fmt.Sprintf("Alert %q not found in org %q.", alertID, org))
 		return
 	}
 
 	state := AlertResourceModel{
-		ID:       types.StringValue(req.ID),
-		OrgID:    types.StringValue(parts[0]),
-		AlertID:  types.StringValue(parts[1]),
-		FolderID: types.StringValue("default"),
+		ID:       types.StringValue(alertResourceID(org, alertID)),
+		OrgID:    types.StringValue(org),
+		AlertID:  types.StringValue(alertID),
+		FolderID: types.StringValue(folderID),
 	}
 	r.applyAlertToModel(ctx, alert, &state, &resp.Diagnostics)
-	r.refreshFolder(ctx, parts[0], parts[1], &state)
+	r.refreshFolder(ctx, org, alertID, &state, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -1586,19 +1599,32 @@ func (r *AlertResource) refresh(ctx context.Context, org, alertID string, model 
 	r.applyAlertToModel(ctx, alert, model, diags)
 }
 
-// refreshFolder resolves which folder holds the alert. The get endpoint does
-// not report it, so it comes from the list endpoint.
-func (r *AlertResource) refreshFolder(ctx context.Context, org, alertID string, model *AlertResourceModel) {
-	alerts, err := r.client.ListAlerts(ctx, org, "")
+// refreshFolder resolves which folder holds the alert, starting with the folder
+// already in the model so an unmoved alert costs one list call. When the alert
+// is in no folder the caller can list, the model keeps its folder and a warning
+// says so, rather than reporting a folder change nobody made.
+func (r *AlertResource) refreshFolder(ctx context.Context, org, alertID string, model *AlertResourceModel, diags *diag.Diagnostics) {
+	known := model.FolderID.ValueString()
+	folderID, err := r.client.FindAlertFolder(ctx, org, alertID, known)
 	if err != nil {
+		diags.AddWarning(
+			"Could not resolve alert folder",
+			fmt.Sprintf("Looking up which folder holds alert %q in org %q failed, so folder_id stays %q: %s",
+				alertID, org, known, err.Error()),
+		)
 		return
 	}
-	for _, a := range alerts {
-		if a.AlertID == alertID {
-			model.FolderID = types.StringValue(a.FolderID)
-			return
-		}
+	if folderID == "" {
+		diags.AddWarning(
+			"Alert folder not found",
+			fmt.Sprintf("Alert %q was not found in any alert folder of org %q that these credentials can list, "+
+				"so folder_id stays %q (the value in state, or the import ID's folder, `default` when it names "+
+				"none) and a move of the alert to another folder cannot be detected. Grant the provider's user "+
+				"read access to the alert's folder.", alertID, org, known),
+		)
+		return
 	}
+	model.FolderID = types.StringValue(folderID)
 }
 
 func (r *AlertResource) applyAlertToModel(ctx context.Context, alert *AlertAPI, model *AlertResourceModel, diags *diag.Diagnostics) {

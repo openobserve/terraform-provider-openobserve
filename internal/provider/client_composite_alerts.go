@@ -131,6 +131,7 @@ type CompositeValidationAPI struct {
 
 // CreateCompositeAlert creates a composite alert and returns its ID.
 func (c *Client) CreateCompositeAlert(ctx context.Context, orgID, folderID string, req CompositeAlertWriteAPI) (string, error) {
+	defer c.alertLists.invalidate(orgID)
 	req.AlertType = "composite"
 	path := fmt.Sprintf("/api/v2/%s/alerts", pathEscape(orgID))
 	if folderID != "" {
@@ -145,6 +146,7 @@ func (c *Client) CreateCompositeAlert(ctx context.Context, orgID, folderID strin
 
 // UpdateCompositeAlert replaces an existing composite alert.
 func (c *Client) UpdateCompositeAlert(ctx context.Context, orgID, alertID string, req CompositeAlertWriteAPI) error {
+	defer c.alertLists.invalidate(orgID)
 	req.AlertType = "composite"
 	path := fmt.Sprintf("/api/v2/%s/alerts/%s", pathEscape(orgID), pathEscape(alertID))
 	return c.do(ctx, http.MethodPut, path, req)

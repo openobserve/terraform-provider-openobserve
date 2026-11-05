@@ -530,6 +530,23 @@ func (d *AlertDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 	if folderID == "" && alert.FolderID != nil {
 		folderID = *alert.FolderID
 	}
+	if folderID == "" && data.FolderID.ValueString() == "" {
+		// The get endpoint does not report the folder, so a lookup by ID
+		// resolves it from the folder listings. A configured folder_id is
+		// left as written: a data source must not contradict its config.
+		found, err := d.client.FindAlertFolder(ctx, org, alertID, "")
+		switch {
+		case err != nil:
+			resp.Diagnostics.AddWarning("Could not resolve alert folder", err.Error())
+		case found == "":
+			resp.Diagnostics.AddWarning(
+				"Alert folder not found",
+				fmt.Sprintf("Alert %q was not found in any alert folder of org %q that these credentials can list, "+
+					"so folder_id is empty.", alertID, org),
+			)
+		}
+		folderID = found
+	}
 	if folderID != "" {
 		data.FolderID = types.StringValue(folderID)
 	} else if data.FolderID.IsNull() {
