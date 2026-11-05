@@ -179,6 +179,26 @@ func TestReconcileJSONKeepsConfiguredDocument(t *testing.T) {
 	}
 }
 
+func TestReconcileJSONKeepsConfiguredSpelling(t *testing.T) {
+	t.Parallel()
+
+	// Terraform compares the applied value with the planned one byte for
+	// byte, so the configured text has to come back as written: indentation,
+	// key order, number spelling and characters json.Marshal would escape.
+	configured := "{\n  \"version\": 8,\n  \"title\": \"a & b\",\n  \"width\": 2.0\n}"
+	server := json.RawMessage(`{"dashboardId":"abc","title":"a & b","version":8,"width":2}`)
+
+	var diags diag.Diagnostics
+	got := reconcileJSON(types.StringValue(configured), server, &diags)
+
+	if diags.HasError() {
+		t.Fatalf("unexpected diagnostics: %+v", diags)
+	}
+	if got.ValueString() != configured {
+		t.Errorf("reconcileJSON() = %q, want the configured text %q", got.ValueString(), configured)
+	}
+}
+
 func TestReconcileJSONReportsRealDrift(t *testing.T) {
 	t.Parallel()
 

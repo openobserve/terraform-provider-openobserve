@@ -89,7 +89,7 @@ resource "openobserve_dashboard" "from_file" {
 
 ### Required
 
-- `dashboard_json` (String) The dashboard document as JSON, including `title`, `version`, `panels`, and any variables. Stored normalized, so formatting differences do not show up as drift.
+- `dashboard_json` (String) The dashboard document as JSON, including `title`, `version`, `panels`, and any variables. Stored as written while the server's document still matches it, so server-added fields do not show up as drift.
 
 ### Optional
 

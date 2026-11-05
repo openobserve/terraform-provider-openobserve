@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A JSON attribute not written in `json.Marshal` form failed to apply.**
+  `dashboard_json` on `openobserve_dashboard`, `config` on
+  `openobserve_synthetic` and `conditions` on `openobserve_alert` were stored
+  re-marshalled (keys sorted, whitespace removed, `2.0` written as `2`, `&`
+  escaped) even when the server's document matched the configuration, so a
+  pretty-printed `file()` failed with "Provider produced inconsistent result
+  after apply" and every later plan showed a diff
+  ([#8](https://github.com/openobserve/terraform-provider-openobserve/issues/8)).
+  The configured text is now stored as written. JSON keys no longer need to be
+  in alphabetical order when the provider is used from Pulumi.
+
 ## [1.4.2] - 2026-10-01
 
 ### Fixed

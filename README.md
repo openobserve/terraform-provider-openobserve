@@ -162,19 +162,6 @@ conditions: JSON.stringify({
 Writing `ignoreCase` there produces an HTTP 422 that names neither the field nor
 the cause.
 
-**Write JSON keys in alphabetical order.** The provider stores these documents
-key-sorted. HCL's `jsonencode` also sorts, so Terraform matches; JavaScript's
-`JSON.stringify` preserves insertion order, so it does not, and the resource
-shows a diff on every `pulumi up` forever:
-
-```ts
-// churns on every up
-config: JSON.stringify({ method: "GET", expect_status: 200, timeout_ms: 10000 }),
-
-// stable
-config: JSON.stringify({ expect_status: 200, method: "GET", timeout_ms: 10000 }),
-```
-
 Also worth knowing: the generated SDK types every input as optional, including
 attributes this provider marks required, so a missing `name` surfaces at `pulumi
 up` rather than at compile time.
