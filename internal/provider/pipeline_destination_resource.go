@@ -2,11 +2,13 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -18,9 +20,28 @@ import (
 )
 
 var (
-	_ resource.Resource                = &PipelineDestinationResource{}
-	_ resource.ResourceWithConfigure   = &PipelineDestinationResource{}
-	_ resource.ResourceWithImportState = &PipelineDestinationResource{}
+	_ resource.Resource                   = &PipelineDestinationResource{}
+	_ resource.ResourceWithConfigure      = &PipelineDestinationResource{}
+	_ resource.ResourceWithImportState    = &PipelineDestinationResource{}
+	_ resource.ResourceWithValidateConfig = &PipelineDestinationResource{}
+	_ resource.ResourceWithModifyPlan     = &PipelineDestinationResource{}
+)
+
+// Output formats the server accepts for a destination. The first three are
+// plain strings on the wire; esbulk and stringseparated are objects carrying
+// their one setting, for example {"esbulk":{"index":"logs"}}.
+const (
+	outputFormatJSON            = "json"
+	outputFormatNDJSON          = "ndjson"
+	outputFormatNestedEvent     = "nestedevent"
+	outputFormatESBulk          = "esbulk"
+	outputFormatStringSeparated = "stringseparated"
+)
+
+// Values of the computed module attribute.
+const (
+	destinationModulePipeline = "pipeline"
+	destinationModuleAlert    = "alert"
 )
 
 // NewPipelineDestinationResource returns a factory for the
@@ -41,6 +62,11 @@ type PipelineDestinationResourceModel struct {
 	Headers         types.Map    `tfsdk:"headers"`
 	DestinationType types.String `tfsdk:"destination_type"`
 	Metadata        types.Map    `tfsdk:"metadata"`
+
+	OutputFormat          types.String `tfsdk:"output_format"`
+	OutputFormatIndex     types.String `tfsdk:"output_format_index"`
+	OutputFormatSeparator types.String `tfsdk:"output_format_separator"`
+	Module                types.String `tfsdk:"module"`
 }
 
 func (r *PipelineDestinationResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -57,6 +83,10 @@ func (r *PipelineDestinationResource) Schema(_ context.Context, _ resource.Schem
 			"destination, and a pipeline cannot send to it. " +
 			"They are separate resources here because that choice decides what the object is for, and because " +
 			"the rest of the alert surface, templates, email recipients and SNS, does not apply to a pipeline.\n\n" +
+			"Provider versions up to 1.4.2 did not send `module`, so a destination they created is an alert " +
+			"destination. The computed `module` attribute reads `alert` for one, and the next plan shows an " +
+			"in-place update that converts it. An alert that also sends to that destination stops working " +
+			"once it is converted, so point such alerts at an `openobserve_alert_destination` first.\n\n" +
 			"The server refuses to delete a destination a pipeline still sends to. Referencing this resource's " +
 			"`name` from the pipeline's `remote_stream` node is what makes Terraform order the two correctly.",
 		Attributes: map[string]schema.Attribute{
@@ -111,8 +141,128 @@ func (r *PipelineDestinationResource) Schema(_ context.Context, _ resource.Schem
 				ElementType: types.StringType,
 				Description: "Free-form key/value pairs carried alongside the destination.",
 			},
+			"output_format": schema.StringAttribute{
+				Optional: true,
+				Computed: true,
+				Default:  stringdefault.StaticString(outputFormatJSON),
+				Validators: []validator.String{stringvalidator.OneOf(
+					outputFormatJSON, outputFormatNDJSON, outputFormatNestedEvent,
+					outputFormatESBulk, outputFormatStringSeparated,
+				)},
+				Description: "How records are encoded in each request: `json` (one JSON array), `ndjson` " +
+					"(one JSON object per line), `nestedevent` (one `{\"event\": ...}` object per line), `esbulk` " +
+					"(Elasticsearch bulk format, into the index named by `output_format_index`), or `stringseparated` " +
+					"(JSON objects joined by `output_format_separator`). Defaults to `json`, which is also what " +
+					"the server uses for a destination saved without one. Leaving it unset means `json`, not " +
+					"\"whatever the server has\": a destination whose format was set outside Terraform, for " +
+					"example `ndjson` in the UI, plans a change back to `json` on the first refresh after " +
+					"upgrading or on import. Set `output_format` to keep the format it has.",
+			},
+			// Neither setting rejects the empty string. The server stores it without
+			// complaint, so a destination saved with one elsewhere has to be
+			// describable here, or no configuration could ever match it.
+			"output_format_index": schema.StringAttribute{
+				Optional: true,
+				Description: "Elasticsearch index the records are written to. Required when `output_format` is " +
+					"`esbulk`, and not allowed otherwise. OpenObserve also accepts an empty index, which sends " +
+					"each record with `\"_index\": \"\"`.",
+			},
+			"output_format_separator": schema.StringAttribute{
+				Optional: true,
+				Description: "String placed between records. Required when `output_format` is `stringseparated`, " +
+					"and not allowed otherwise. An empty separator joins the records with nothing between them.",
+			},
+			"module": schema.StringAttribute{
+				Computed: true,
+				Description: "What the server stores this destination as: `pipeline`, or `alert` for one created by " +
+					"provider version 1.4.2 or earlier, which a pipeline cannot send to. When it reads `alert`, the " +
+					"plan shows an in-place update that converts the destination to a pipeline destination. " +
+					"The check runs only while state has no module recorded, which is after upgrading and on " +
+					"import, so it does not cost a listing of every destination on each refresh. Once state " +
+					"records `pipeline`, a destination re-saved as an alert destination outside Terraform is not " +
+					"detected again.",
+				PlanModifiers: []planmodifier.String{destinationModuleAlwaysPipeline{}},
+			},
 		},
 	}
+}
+
+// ValidateConfig requires the setting esbulk and stringseparated carry, and
+// rejects it for the other formats, which have nowhere to put it.
+func (r *PipelineDestinationResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var config PipelineDestinationResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	checkOutputFormatSettings(&config, &resp.Diagnostics)
+}
+
+// ModifyPlan repeats the output_format checks once every value is known.
+// ValidateConfig has to skip a value that is unknown until apply, and if it
+// then turns out wrong, the server drops the setting and the apply ends in
+// "Provider produced inconsistent result" instead of a clear message.
+// Terraform plans again with the values known before it applies, which is
+// where this catches it.
+func (r *PipelineDestinationResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+	var plan PipelineDestinationResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	checkOutputFormatSettings(&plan, &resp.Diagnostics)
+}
+
+// checkOutputFormatSettings requires the setting esbulk and stringseparated
+// carry, and rejects it with any other format. Anything still unknown is left
+// for a later check.
+func checkOutputFormatSettings(model *PipelineDestinationResourceModel, diags *diag.Diagnostics) {
+	if model.OutputFormat.IsUnknown() {
+		return
+	}
+	format := model.OutputFormat.ValueString()
+	if model.OutputFormat.IsNull() {
+		format = outputFormatJSON
+	}
+	checkOutputFormatSetting(diags, model.OutputFormatIndex, "output_format_index", outputFormatESBulk, format)
+	checkOutputFormatSetting(diags, model.OutputFormatSeparator, "output_format_separator", outputFormatStringSeparated, format)
+}
+
+func checkOutputFormatSetting(diags *diag.Diagnostics, v types.String, attr, owner, format string) {
+	if v.IsUnknown() {
+		return
+	}
+	switch {
+	case format == owner && v.IsNull():
+		diags.AddAttributeError(path.Root(attr), "Missing "+attr,
+			fmt.Sprintf("`%s` is required when `output_format` is `%s`.", attr, owner))
+	case format != owner && !v.IsNull():
+		diags.AddAttributeError(path.Root(attr), "Unexpected "+attr,
+			fmt.Sprintf("`%s` only applies when `output_format` is `%s`.", attr, owner))
+	}
+}
+
+// destinationModuleAlwaysPipeline plans module as "pipeline". Create and
+// update send module=pipeline, so that is what the destination is after apply, and
+// a state that reads "alert" becomes a planned update that converts it.
+type destinationModuleAlwaysPipeline struct{}
+
+func (m destinationModuleAlwaysPipeline) Description(_ context.Context) string {
+	return "Always \"pipeline\": create and update store the destination as a pipeline destination."
+}
+
+func (m destinationModuleAlwaysPipeline) MarkdownDescription(ctx context.Context) string {
+	return m.Description(ctx)
+}
+
+func (m destinationModuleAlwaysPipeline) PlanModifyString(_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+	resp.PlanValue = types.StringValue(destinationModulePipeline)
 }
 
 func (r *PipelineDestinationResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
@@ -130,7 +280,65 @@ func (r *PipelineDestinationResource) apiFromModel(ctx context.Context, model *P
 		// as a pipeline destination with the module=pipeline query parameter.
 		DestinationTypeName: optString(model.DestinationType),
 		Metadata:            stringsFromMap(ctx, model.Metadata, diags),
+		OutputFormat:        outputFormatToAPI(model, diags),
 		Emails:              []string{},
+	}
+}
+
+// outputFormatToAPI encodes the output_format attributes the way the server's
+// externally tagged enum expects them.
+func outputFormatToAPI(model *PipelineDestinationResourceModel, diags *diag.Diagnostics) json.RawMessage {
+	if model.OutputFormat.IsNull() || model.OutputFormat.IsUnknown() {
+		return nil
+	}
+	var v any
+	switch format := model.OutputFormat.ValueString(); format {
+	case outputFormatESBulk:
+		v = map[string]map[string]string{format: {"index": model.OutputFormatIndex.ValueString()}}
+	case outputFormatStringSeparated:
+		v = map[string]map[string]string{format: {"separator": model.OutputFormatSeparator.ValueString()}}
+	default:
+		v = format
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		diags.AddError("Error encoding output_format", err.Error())
+		return nil
+	}
+	return raw
+}
+
+// outputFormatFromAPI decodes the server's output_format into the three
+// attributes. A destination saved without one reads back with none, and the
+// server sends that destination's records as json, so json is what it
+// reports: a destination created before this attribute existed plans clean
+// once it is refreshed.
+func outputFormatFromAPI(raw json.RawMessage, model *PipelineDestinationResourceModel, diags *diag.Diagnostics) {
+	model.OutputFormat = types.StringValue(outputFormatJSON)
+	model.OutputFormatIndex = types.StringNull()
+	model.OutputFormatSeparator = types.StringNull()
+	if len(raw) == 0 || string(raw) == "null" {
+		return
+	}
+
+	var name string
+	if err := json.Unmarshal(raw, &name); err == nil {
+		model.OutputFormat = types.StringValue(name)
+		return
+	}
+	var tagged map[string]struct {
+		Index     *string `json:"index"`
+		Separator *string `json:"separator"`
+	}
+	if err := json.Unmarshal(raw, &tagged); err != nil || len(tagged) != 1 {
+		diags.AddError("Unexpected output_format from server",
+			fmt.Sprintf("Could not read output_format %s.", string(raw)))
+		return
+	}
+	for name, settings := range tagged {
+		model.OutputFormat = types.StringValue(name)
+		model.OutputFormatIndex = stringFromPtr(settings.Index)
+		model.OutputFormatSeparator = stringFromPtr(settings.Separator)
 	}
 }
 
@@ -180,7 +388,44 @@ func (r *PipelineDestinationResource) Read(ctx context.Context, req resource.Rea
 	state.OrgID = types.StringValue(org)
 	state.ID = types.StringValue(functionResourceID(org, state.Name.ValueString()))
 	r.applyToModel(ctx, dest, &state, &resp.Diagnostics)
+	state.Module = r.readModule(ctx, org, state.Name.ValueString(), state.Module, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+}
+
+// readModule reports whether the server stores the destination as a pipeline
+// destination or as an alert one. Provider versions up to 1.4.2 created alert
+// destinations, and the single-destination GET does not reliably say which it
+// is.
+//
+// The listing needs permission to list destinations, which a role allowed to
+// read this one may lack. Failing the refresh over it would make the resource
+// unusable for that role, so a failed listing is a warning and module keeps
+// the value it had.
+//
+// Only a destination with no recorded module, which is one written by an
+// earlier provider version or one being imported, can read as alert. Every
+// write by this version stores a pipeline destination, and the listing can
+// leave out one that exists: an enterprise listing is filtered by the
+// caller's permissions, and a node's cache can lag behind a write. Trusting
+// its absence there would plan the same conversion on every refresh.
+func (r *PipelineDestinationResource) readModule(ctx context.Context, org, name string, prior types.String, diags *diag.Diagnostics) types.String {
+	if prior.ValueString() == destinationModulePipeline {
+		return prior
+	}
+	names, err := r.client.ListPipelineDestinationNames(ctx, org)
+	if err != nil {
+		diags.AddWarning("Could not check how the pipeline destination is stored",
+			fmt.Sprintf("Listing the pipeline destinations of org %q failed, so the provider cannot tell whether "+
+				"%q is still an alert destination left by provider version 1.4.2 or earlier: %s\n\n"+
+				"Until it is known, the plan shows module changing to \"pipeline\". Applying once settles it: "+
+				"the update stores the destination as a pipeline destination, whichever it was, and this "+
+				"check does not run again.", org, name, err))
+		return prior
+	}
+	if names[name] {
+		return types.StringValue(destinationModulePipeline)
+	}
+	return types.StringValue(destinationModuleAlert)
 }
 
 func (r *PipelineDestinationResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -248,6 +493,7 @@ func (r *PipelineDestinationResource) ImportState(ctx context.Context, req resou
 		Name:  types.StringValue(parts[1]),
 	}
 	r.applyToModel(ctx, dest, &state, &resp.Diagnostics)
+	state.Module = r.readModule(ctx, parts[0], parts[1], types.StringNull(), &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -263,6 +509,8 @@ func (r *PipelineDestinationResource) refresh(ctx context.Context, org, name str
 		return
 	}
 	r.applyToModel(ctx, dest, model, diags)
+	// The write that preceded this read sent module=pipeline.
+	model.Module = types.StringValue(destinationModulePipeline)
 }
 
 func (r *PipelineDestinationResource) applyToModel(ctx context.Context, api *PipelineDestinationAPI, model *PipelineDestinationResourceModel, diags *diag.Diagnostics) {
@@ -273,6 +521,7 @@ func (r *PipelineDestinationResource) applyToModel(ctx context.Context, api *Pip
 		model.Method = types.StringValue(api.Method)
 	}
 	model.DestinationType = stringFromPtr(api.DestinationTypeName)
+	outputFormatFromAPI(api.OutputFormat, model, diags)
 
 	// The server echoes an empty map for both of these when nothing was set.
 	// Reporting that as an empty map where the configuration said nothing would

@@ -189,6 +189,28 @@ func (c *Client) GetPipelineDestination(ctx context.Context, orgID, name string)
 	return &out, nil
 }
 
+// ListPipelineDestinationNames returns the names of the destinations the
+// server stores as pipeline destinations.
+//
+// The single-destination GET returns the same fields for an alert destination
+// and a pipeline destination, and an alert one without a template looks
+// exactly like a pipeline one, so this listing, filtered with module=pipeline,
+// is the only reliable way to tell which one a name refers to.
+func (c *Client) ListPipelineDestinationNames(ctx context.Context, orgID string) (map[string]bool, error) {
+	path := fmt.Sprintf("/api/%s/alerts/destinations?module=pipeline", pathEscape(orgID))
+	var out []struct {
+		Name string `json:"name"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	names := make(map[string]bool, len(out))
+	for _, d := range out {
+		names[d.Name] = true
+	}
+	return names, nil
+}
+
 // DeletePipelineDestination removes a pipeline destination.
 func (c *Client) DeletePipelineDestination(ctx context.Context, orgID, name string) error {
 	path := fmt.Sprintf("/api/%s/alerts/destinations/%s", pathEscape(orgID), pathEscape(name))
