@@ -53,7 +53,7 @@ func (d *FolderDataSource) Schema(_ context.Context, _ datasource.SchemaRequest,
 			"folder_type": schema.StringAttribute{
 				Optional:    true,
 				Computed:    true,
-				Description: "What the folder holds: `dashboards` (default), `alerts`, `reports`, or `synthetics`.",
+				Description: "What the folder holds: `dashboards` (default), `alerts`, `reports`, `synthetics`, or `downtimes`.",
 				Validators:  []validator.String{stringvalidator.OneOf(folderTypes...)},
 			},
 			"folder_id": schema.StringAttribute{
@@ -165,7 +165,7 @@ func (d *FoldersDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 			"folder_type": schema.StringAttribute{
 				Optional:    true,
 				Computed:    true,
-				Description: "What the folders hold: `dashboards` (default), `alerts`, `reports`, or `synthetics`.",
+				Description: "What the folders hold: `dashboards` (default), `alerts`, `reports`, `synthetics`, or `downtimes`.",
 				Validators:  []validator.String{stringvalidator.OneOf(folderTypes...)},
 			},
 			"folders": schema.ListNestedAttribute{

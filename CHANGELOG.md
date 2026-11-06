@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`openobserve_downtime`** manages maintenance windows that mute alerts,
+  anomaly detections and synthetics checks and correct SLOs. A downtime is
+  one-time (`starts_at` to `ends_at`, RFC 3339 timestamps) or recurring
+  (`daily` or `weekly`, with `start_time_local`, `duration_secs` and
+  `weekdays` in a `timezone`). Each `target` block picks a module and narrows
+  it by `folder_ids`, `ids` or, for synthetics, `tags`, with `slo_mode` for
+  SLOs and `incident_mode` for alerts. `condition` narrows by dimensions, as a
+  JSON document. `notifications` announces the downtime's events to alert
+  destinations, and `show_banner` controls the org-wide banner. Destroying an
+  active or scheduled downtime cancels it first, as the server requires; one
+  that already corrected SLO slices is moved to the `default` folder and left
+  to the server's retention, with a warning. A downtime that was ended or cancelled when last
+  read stays in state after the server's retention deletes it, so a
+  cancelled window is not created again. Changing `folder_id` moves the
+  downtime in place.
+  Most of the server's rules on schedules, targets and notifications are
+  checked at plan time; the timezone name, condition keys and depth,
+  destination names and the per-org cap are left to the server. Supports import as `{org_id}/{downtime_id}`. Requires
+  OpenObserve Enterprise v1.2.0-rc1 or later.
+- **`folder_type = "downtimes"`** on `openobserve_folder`, for downtime
+  folders.
 - **Recovery and on-call settings on `openobserve_alert`**:
   `recovery_destinations`, `keep_firing_for`, `suppress_repeats`,
   `runbook_url`, `oncall_team` and `query_condition.promql_rule_mode`. Until

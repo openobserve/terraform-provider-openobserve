@@ -29,7 +29,7 @@ output "folder_ids_by_name" {
 
 ### Optional
 
-- `folder_type` (String) What the folders hold: `dashboards` (default), `alerts`, `reports`, or `synthetics`.
+- `folder_type` (String) What the folders hold: `dashboards` (default), `alerts`, `reports`, `synthetics`, or `downtimes`.
 - `org_id` (String) Organization identifier. Defaults to the provider's `org_id`.
 
 ### Read-Only

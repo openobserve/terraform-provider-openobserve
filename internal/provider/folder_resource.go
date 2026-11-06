@@ -22,7 +22,7 @@ var (
 )
 
 // folderTypes are the folder namespaces OpenObserve supports.
-var folderTypes = []string{"dashboards", "alerts", "reports", "synthetics"}
+var folderTypes = []string{"dashboards", "alerts", "reports", "synthetics", "downtimes"}
 
 // NewFolderResource returns a factory for the openobserve_folder resource.
 func NewFolderResource() resource.Resource {
@@ -50,7 +50,7 @@ func (r *FolderResource) Metadata(_ context.Context, req resource.MetadataReques
 
 func (r *FolderResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Manages a folder that groups dashboards, alerts, reports, or synthetics.",
+		Description: "Manages a folder that groups dashboards, alerts, reports, synthetics, or downtimes.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -75,7 +75,7 @@ func (r *FolderResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Optional:    true,
 				Computed:    true,
 				Default:     stringdefault.StaticString("dashboards"),
-				Description: "What the folder holds: `dashboards` (default), `alerts`, `reports`, or `synthetics`.",
+				Description: "What the folder holds: `dashboards` (default), `alerts`, `reports`, `synthetics`, or `downtimes`. Downtime folders need OpenObserve Enterprise v1.2.0-rc1 or later.",
 				Validators:  []validator.String{stringvalidator.OneOf(folderTypes...)},
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),

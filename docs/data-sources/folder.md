@@ -30,7 +30,7 @@ resource "openobserve_dashboard" "example" {
 ### Optional
 
 - `folder_id` (String) Folder identifier. Supply this or `name`.
-- `folder_type` (String) What the folder holds: `dashboards` (default), `alerts`, `reports`, or `synthetics`.
+- `folder_type` (String) What the folder holds: `dashboards` (default), `alerts`, `reports`, `synthetics`, or `downtimes`.
 - `name` (String) Folder name. Supply this or `folder_id`.
 - `org_id` (String) Organization identifier. Defaults to the provider's `org_id`.
 
