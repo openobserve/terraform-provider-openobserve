@@ -626,9 +626,24 @@ func (r *DowntimeResource) Create(ctx context.Context, req resource.CreateReques
 	plan.ID = types.StringValue(downtimeResourceID(org, id))
 	r.refresh(ctx, org, id, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
+		// The downtime exists. Record it, so Terraform marks it tainted and
+		// replaces it, rather than leaving it on the server untracked.
+		keepCreatedDowntime(ctx, &plan, resp)
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// keepCreatedDowntime writes a created downtime to state when reading it back
+// failed, with the values that are still unknown set to null.
+func keepCreatedDowntime(ctx context.Context, plan *DowntimeResourceModel, resp *resource.CreateResponse) {
+	if plan.Status.IsUnknown() {
+		plan.Status = types.StringNull()
+	}
+	if plan.Schedule != nil && plan.Schedule.DurationSecs.IsUnknown() {
+		plan.Schedule.DurationSecs = types.Int64Null()
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
 func (r *DowntimeResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {

@@ -39,6 +39,9 @@ type fakeDowntimes struct {
 	// endBeforeCancel makes a cancel answer 409 "already ended", as when the
 	// window ends between the provider's read and its cancel.
 	endBeforeCancel bool
+	// forbidGet makes a GET by id answer 403, as for a user who may list
+	// downtimes but not read one.
+	forbidGet bool
 	// statusOverride is the status a GET reports, by id, instead of the real one.
 	statusOverride map[string]string
 }
@@ -153,6 +156,10 @@ func (f *fakeDowntimes) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		switch r.Method {
 		case http.MethodGet:
+			if f.forbidGet {
+				http.Error(w, "Unauthorized Access", http.StatusForbidden)
+				return
+			}
 			out := map[string]any{}
 			for k, v := range row {
 				out[k] = v
@@ -733,5 +740,25 @@ func TestSameDowntimeConditionUnicode(t *testing.T) {
 	}
 	if sameDowntimeCondition(pair("prod"), pair("staging")) {
 		t.Error("different values must differ")
+	}
+}
+
+// A create whose read-back fails still records the downtime, so it is not
+// left on the server untracked.
+func TestDowntimeCreateKeepsStateWhenReadFails(t *testing.T) {
+	t.Parallel()
+	fake, client := newFakeDowntimes(t)
+	fake.forbidGet = true
+	r := &DowntimeResource{client: client}
+	plan := oneTimeDowntime(future(time.Hour), future(2*time.Hour))
+	p := tfValue(t, r, plan)
+	resp := &resource.CreateResponse{State: tfsdk.State{Schema: p.Schema, Raw: tftypes.NewValue(p.Schema.Type().TerraformType(context.Background()), nil)}}
+	r.Create(context.Background(), resource.CreateRequest{Plan: tfsdk.Plan(p), Config: tfsdk.Config(p)}, resp)
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("want the read error")
+	}
+	got := downtimeState(t, r, resp.State)
+	if got.DowntimeID.ValueString() != "dt1" || got.ID.ValueString() != "default/dt1" {
+		t.Errorf("state: got id %v / %v, want the created downtime", got.ID, got.DowntimeID)
 	}
 }
