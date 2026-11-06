@@ -5,7 +5,7 @@ subcategory: ""
 description: |-
   Manages an OpenObserve alert.
   An alert evaluates a query against a stream and notifies one or more destinations when the result crosses a threshold. Set is_real_time for alerts that fire as matching data arrives; leave it false for scheduled alerts driven by trigger_condition.frequency.
-  OpenObserve replaces the whole alert on update. Settings this resource does not manage yet are read from the server before each update and sent back unchanged, so a value set in the UI or through the API survives: runbook_url, oncall_team, incident_title_template, recovery_destinations, keep_firing_for, suppress_repeats and query_condition.promql_rule_mode. See notify_on_recovery for the cases where the server forces some of them off.
+  OpenObserve replaces the whole alert on update. Settings left unset are read from the server before each update and sent back unchanged, so a value set in the UI or through the API survives: notify_on_recovery, recovery_destinations, keep_firing_for, suppress_repeats, runbook_url, oncall_team, destinations and query_condition.promql_rule_mode, and the incident title template, which this resource does not manage yet. See notify_on_recovery for the cases where the server forces some of them off.
 ---
 
 # openobserve_alert (Resource)
@@ -14,7 +14,7 @@ Manages an OpenObserve alert.
 
 An alert evaluates a query against a stream and notifies one or more destinations when the result crosses a threshold. Set `is_real_time` for alerts that fire as matching data arrives; leave it false for scheduled alerts driven by `trigger_condition.frequency`.
 
-OpenObserve replaces the whole alert on update. Settings this resource does not manage yet are read from the server before each update and sent back unchanged, so a value set in the UI or through the API survives: `runbook_url`, `oncall_team`, `incident_title_template`, `recovery_destinations`, `keep_firing_for`, `suppress_repeats` and `query_condition.promql_rule_mode`. See `notify_on_recovery` for the cases where the server forces some of them off.
+OpenObserve replaces the whole alert on update. Settings left unset are read from the server before each update and sent back unchanged, so a value set in the UI or through the API survives: `notify_on_recovery`, `recovery_destinations`, `keep_firing_for`, `suppress_repeats`, `runbook_url`, `oncall_team`, `destinations` and `query_condition.promql_rule_mode`, and the incident title template, which this resource does not manage yet. See `notify_on_recovery` for the cases where the server forces some of them off.
 
 ## Example Usage
 
@@ -216,6 +216,9 @@ Leave it unset to keep whatever the server holds across updates, so destinations
 - `enabled` (Boolean) Whether the alert is evaluated. Disabled alerts stay configured but never fire.
 - `folder_id` (String) Alert folder that holds this alert. Use `openobserve_folder` with `folder_type = "alerts"` to create one.
 - `is_real_time` (Boolean) Evaluate as data arrives instead of on a schedule.
+- `keep_firing_for` (Number) Seconds the condition must stay clear before a firing alert recovers, from 0 to 86400 (one day). 0, the server default, recovers on the first clear evaluation. Like Prometheus' `keep_firing_for`, it stops a flapping condition from sending a recovery and a new firing every few minutes.
+
+Not accepted on a real-time alert. Leave it unset to keep whatever the server holds across updates, so a value set in the UI or through the API is not reset by an unrelated change. Set it to manage the value, and a change made elsewhere then shows as drift. Removing it from a configuration that set it stops managing it and leaves the server value as it is.
 - `notify_on_recovery` (Boolean) Send a notification when a firing alert recovers, that is, when its condition clears. A multi-alert sends one per recovered group.
 
 Leave it unset to keep whatever the server holds across updates: the provider reads the current value and sends it back on every update, so a flag switched on in the UI or through the API is not turned off by an unrelated change. Set it to manage the flag, and a change made elsewhere then shows as drift. An alert created without it, including one Terraform replaces (a change to `stream_type` or `stream_name`), starts from the server default, `false`, so configure it where it must survive a replacement. Removing the attribute from a configuration that set it stops managing it and leaves the server value as it is.
@@ -224,9 +227,10 @@ While it is `true`, the server checks the recovery path on every save, update in
 
 The value is read again at apply time, so if it changed on the server after the plan was made (or the plan used `-refresh=false`), the update still sends the server's value. State records the planned value for that apply and picks up the server's on the next refresh, with no diff.
 
-The recovery settings this resource does not expose yet, `recovery_destinations`, `keep_firing_for` and `suppress_repeats`, are carried over from the server on every update too, with two exceptions the server forces: `recovery_destinations` is dropped when `notify_on_recovery` is `false`, and all three are dropped on a real-time alert.
+`recovery_destinations`, `keep_firing_for` and `suppress_repeats` work the same way when unset, with two exceptions the server forces: an unset `recovery_destinations` is dropped when `notify_on_recovery` is `false`, and all three are dropped on a real-time alert.
 
 Not accepted on a real-time alert, which keeps no state to recover from. Making an alert real-time while the server holds `true` and this attribute is unset plans cleanly but fails at apply, asking for `notify_on_recovery = false`.
+- `oncall_team` (String) ID of the on-call team this alert pages, overriding the team the server would find from the alert's dimensions. The server refuses an ID that is not an on-call team of the organization. Set it to `""` to go back to ownership discovery. Needs OpenObserve Enterprise with on-call. Leave it unset to keep whatever the server holds across updates, so a value set in the UI or through the API is not reset by an unrelated change. Set it to manage the value, and a change made elsewhere then shows as drift. Removing it from a configuration that set it stops managing it and leaves the server value as it is.
 - `org_id` (String) Organization the alert belongs to. Defaults to the provider's `org_id`.
 - `owner` (String) Email of the alert owner. Defaults to the account the provider authenticates as.
 - `pending_period_sec` (Number) How long the condition must hold before the alert fires, in seconds.
@@ -236,8 +240,15 @@ Zero, the default, fires on the first evaluation that breaches. A pending period
 Not accepted on a real-time alert, which has no schedule to wait across.
 - `priority` (Number) Triage priority from 1 (most urgent) to 5. Display metadata only; it does not affect when the alert fires.
 - `query_condition` (Block, Optional) What the alert evaluates. (see [below for nested schema](#nestedblock--query_condition))
+- `recovery_destinations` (Set of String) Destinations the recovery notification goes to, when it should not follow the firing. Empty sends it to the alert's own `destinations`. A PagerDuty, Opsgenie or ServiceNow destination recovers by closing the ticket its own firing opened, so the server refuses one here unless it is also in `destinations`, where it already receives the recovery.
+
+Needs `notify_on_recovery = true`, and is not accepted on a real-time alert. Leave it unset to keep whatever the server holds across updates, so a value set in the UI or through the API is not reset by an unrelated change. Set it to manage the value, and a change made elsewhere then shows as drift. Removing it from a configuration that set it stops managing it and leaves the server value as it is.
 - `row_template` (String) Template applied to each matched row when rendering `{rows}` in the message.
 - `row_template_type` (String) How `row_template` is rendered: `String` (default) or `Json`.
+- `runbook_url` (String) Link to the runbook for this alert, copied onto every on-call page it opens. Must be an `http://` or `https://` URL with a host, at most 2048 characters. Set it to `""` to remove the link. Leave it unset to keep whatever the server holds across updates, so a value set in the UI or through the API is not reset by an unrelated change. Set it to manage the value, and a change made elsewhere then shows as drift. Removing it from a configuration that set it stops managing it and leaves the server value as it is.
+- `suppress_repeats` (Boolean) Notify once per state change instead of on every evaluation that fires: once when the alert starts firing (or its level changes) and, with `notify_on_recovery`, once when it recovers. `silence` is still checked first.
+
+Honored by OpenObserve Enterprise only; other builds ignore it. Not accepted on a real-time alert. Leave it unset to keep whatever the server holds across updates, so a value set in the UI or through the API is not reset by an unrelated change. Set it to manage the value, and a change made elsewhere then shows as drift. Removing it from a configuration that set it stops managing it and leaves the server value as it is.
 - `tags` (Set of String) Selection tags such as `prod` or `service:checkout`.
 - `template` (String) Template used for every destination, overriding each destination's own template. Lets one set of destinations serve alerts with different message formats.
 - `trigger_condition` (Block, Optional) When and how often the alert is evaluated, and what counts as firing. (see [below for nested schema](#nestedblock--trigger_condition))
@@ -272,8 +283,11 @@ Optional:
 - `conditions` (String) Filter conditions for `custom` alerts, as a JSON document. Use `jsonencode()` to build it. Both the flat and the nested (grouped) condition formats are accepted.
 - `multi_time_range` (Block List) Historical windows to compare the current window against. (see [below for nested schema](#nestedblock--query_condition--multi_time_range))
 - `promql` (String) PromQL expression. Required when `type` is `promql`.
-- `promql_condition` (Block, Optional) Comparison applied to the PromQL result. Required when `type` is `promql`. (see [below for nested schema](#nestedblock--query_condition--promql_condition))
+- `promql_condition` (Block, Optional) Comparison applied to the PromQL result. Required when `type` is `promql`, unless `promql_rule_mode` is on, which refuses it. (see [below for nested schema](#nestedblock--query_condition--promql_condition))
 - `promql_multi_alert` (Boolean) Evaluate and notify per returned series rather than collapsing the query to one verdict. The group key is the series' full label set, chosen by the expression's own `by (…)` clause. This is PromQL's counterpart to `aggregation.multi_alert`.
+- `promql_rule_mode` (Boolean) Evaluate `promql` the way a Prometheus alerting rule does: every series the expression returns is firing, so the comparison belongs in the expression itself (`rate(errors[5m]) > 0.1`). Needs `type = "promql"` and `stream_type = "metrics"`, and the server refuses it together with `promql_condition`, `promql_warning_value`, `aggregation`, `multi_time_range`, `trigger_condition.warning_threshold` or a trigger other than `>= 1` (the default) or `> 0`. With a `pending_period_sec`, set `promql_multi_alert = true` too: the server turns it on so that each series waits out its own pending period.
+
+Leave it unset to keep whatever the server holds across updates, as with `notify_on_recovery`. It is dropped when the alert stops being a PromQL alert.
 - `promql_warning_value` (Number) Warning-level value for the PromQL comparison, sharing the operator of `promql_condition`. Omit for a single-level alert.
 - `search_event_type` (String) Search event classification recorded for the alert's queries.
 - `slo_condition` (Block, Optional) What to watch on an SLO. Required when `type` is `slo`.

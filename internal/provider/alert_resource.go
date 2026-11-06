@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -31,6 +32,7 @@ var (
 	_ resource.ResourceWithConfigure      = &AlertResource{}
 	_ resource.ResourceWithImportState    = &AlertResource{}
 	_ resource.ResourceWithValidateConfig = &AlertResource{}
+	_ resource.ResourceWithModifyPlan     = &AlertResource{}
 )
 
 // thresholdOperators are what `trigger_condition.operator` accepts.
@@ -87,36 +89,43 @@ type AlertResource struct {
 
 // AlertResourceModel holds the Terraform state for an alert.
 type AlertResourceModel struct {
-	ID                types.String                `tfsdk:"id"`
-	AlertID           types.String                `tfsdk:"alert_id"`
-	OrgID             types.String                `tfsdk:"org_id"`
-	FolderID          types.String                `tfsdk:"folder_id"`
-	Name              types.String                `tfsdk:"name"`
-	StreamType        types.String                `tfsdk:"stream_type"`
-	StreamName        types.String                `tfsdk:"stream_name"`
-	IsRealTime        types.Bool                  `tfsdk:"is_real_time"`
-	Enabled           types.Bool                  `tfsdk:"enabled"`
-	Description       types.String                `tfsdk:"description"`
-	Destinations      types.Set                   `tfsdk:"destinations"`
-	Template          types.String                `tfsdk:"template"`
-	ContextAttributes types.Map                   `tfsdk:"context_attributes"`
-	RowTemplate       types.String                `tfsdk:"row_template"`
-	RowTemplateType   types.String                `tfsdk:"row_template_type"`
-	TZOffset          types.Int64                 `tfsdk:"tz_offset"`
-	Owner             types.String                `tfsdk:"owner"`
-	Priority          types.Int64                 `tfsdk:"priority"`
-	Tags              types.Set                   `tfsdk:"tags"`
-	CreatesIncident   types.Bool                  `tfsdk:"creates_incident"`
-	Workflows         types.Set                   `tfsdk:"workflows"`
-	PendingPeriodSec  types.Int64                 `tfsdk:"pending_period_sec"`
-	NotifyOnRecovery  types.Bool                  `tfsdk:"notify_on_recovery"`
-	Deduplication     *AlertDeduplicationModel    `tfsdk:"deduplication"`
-	QueryCondition    *AlertQueryConditionModel   `tfsdk:"query_condition"`
-	TriggerCondition  *AlertTriggerConditionModel `tfsdk:"trigger_condition"`
-	LastTriggeredAt   types.Int64                 `tfsdk:"last_triggered_at"`
-	LastSatisfiedAt   types.Int64                 `tfsdk:"last_satisfied_at"`
-	UpdatedAt         types.Int64                 `tfsdk:"updated_at"`
-	LastEditedBy      types.String                `tfsdk:"last_edited_by"`
+	ID                types.String `tfsdk:"id"`
+	AlertID           types.String `tfsdk:"alert_id"`
+	OrgID             types.String `tfsdk:"org_id"`
+	FolderID          types.String `tfsdk:"folder_id"`
+	Name              types.String `tfsdk:"name"`
+	StreamType        types.String `tfsdk:"stream_type"`
+	StreamName        types.String `tfsdk:"stream_name"`
+	IsRealTime        types.Bool   `tfsdk:"is_real_time"`
+	Enabled           types.Bool   `tfsdk:"enabled"`
+	Description       types.String `tfsdk:"description"`
+	Destinations      types.Set    `tfsdk:"destinations"`
+	Template          types.String `tfsdk:"template"`
+	ContextAttributes types.Map    `tfsdk:"context_attributes"`
+	RowTemplate       types.String `tfsdk:"row_template"`
+	RowTemplateType   types.String `tfsdk:"row_template_type"`
+	TZOffset          types.Int64  `tfsdk:"tz_offset"`
+	Owner             types.String `tfsdk:"owner"`
+	Priority          types.Int64  `tfsdk:"priority"`
+	Tags              types.Set    `tfsdk:"tags"`
+	CreatesIncident   types.Bool   `tfsdk:"creates_incident"`
+	Workflows         types.Set    `tfsdk:"workflows"`
+	PendingPeriodSec  types.Int64  `tfsdk:"pending_period_sec"`
+	NotifyOnRecovery  types.Bool   `tfsdk:"notify_on_recovery"`
+	// The settings below are Optional+Computed with no default: unset, an
+	// update sends what the server holds. See keepUnmanagedSettings.
+	RecoveryDestinations types.Set                   `tfsdk:"recovery_destinations"`
+	KeepFiringFor        types.Int64                 `tfsdk:"keep_firing_for"`
+	SuppressRepeats      types.Bool                  `tfsdk:"suppress_repeats"`
+	RunbookURL           types.String                `tfsdk:"runbook_url"`
+	OncallTeam           types.String                `tfsdk:"oncall_team"`
+	Deduplication        *AlertDeduplicationModel    `tfsdk:"deduplication"`
+	QueryCondition       *AlertQueryConditionModel   `tfsdk:"query_condition"`
+	TriggerCondition     *AlertTriggerConditionModel `tfsdk:"trigger_condition"`
+	LastTriggeredAt      types.Int64                 `tfsdk:"last_triggered_at"`
+	LastSatisfiedAt      types.Int64                 `tfsdk:"last_satisfied_at"`
+	UpdatedAt            types.Int64                 `tfsdk:"updated_at"`
+	LastEditedBy         types.String                `tfsdk:"last_edited_by"`
 }
 
 // AlertQueryConditionModel is the query_condition block.
@@ -127,6 +136,7 @@ type AlertQueryConditionModel struct {
 	PromQLCondition    *AlertConditionModel    `tfsdk:"promql_condition"`
 	PromQLWarningValue types.Float64           `tfsdk:"promql_warning_value"`
 	PromQLMultiAlert   types.Bool              `tfsdk:"promql_multi_alert"`
+	PromQLRuleMode     types.Bool              `tfsdk:"promql_rule_mode"`
 	Conditions         types.String            `tfsdk:"conditions"`
 	Aggregation        *AlertAggregationModel  `tfsdk:"aggregation"`
 	SloCondition       *AlertSloConditionModel `tfsdk:"slo_condition"`
@@ -252,11 +262,12 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"An alert evaluates a query against a stream and notifies one or more destinations when the result crosses " +
 			"a threshold. Set `is_real_time` for alerts that fire as matching data arrives; leave it false for scheduled " +
 			"alerts driven by `trigger_condition.frequency`.\n\n" +
-			"OpenObserve replaces the whole alert on update. Settings this resource does not manage yet are read " +
-			"from the server before each update and sent back unchanged, so a value set in the UI or through the " +
-			"API survives: `runbook_url`, `oncall_team`, `incident_title_template`, `recovery_destinations`, " +
-			"`keep_firing_for`, `suppress_repeats` and `query_condition.promql_rule_mode`. See " +
-			"`notify_on_recovery` for the cases where the server forces some of them off.",
+			"OpenObserve replaces the whole alert on update. Settings left unset are read from the server before " +
+			"each update and sent back unchanged, so a value set in the UI or through the API survives: " +
+			"`notify_on_recovery`, `recovery_destinations`, `keep_firing_for`, `suppress_repeats`, `runbook_url`, " +
+			"`oncall_team`, `destinations` and `query_condition.promql_rule_mode`, and the incident title template, " +
+			"which this resource does not manage yet. See `notify_on_recovery` for the cases where the server " +
+			"forces some of them off.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -398,13 +409,62 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"made (or the plan used `-refresh=false`), the update still sends the server's value. State " +
 					"records the planned value for that apply and picks up the server's on the next refresh, " +
 					"with no diff.\n\n" +
-					"The recovery settings this resource does not expose yet, `recovery_destinations`, " +
-					"`keep_firing_for` and `suppress_repeats`, are carried over from the server on every update " +
-					"too, with two exceptions the server forces: `recovery_destinations` is dropped when " +
-					"`notify_on_recovery` is `false`, and all three are dropped on a real-time alert.\n\n" +
+					"`recovery_destinations`, `keep_firing_for` and `suppress_repeats` work the same way when " +
+					"unset, with two exceptions the server forces: an unset `recovery_destinations` is dropped " +
+					"when `notify_on_recovery` is `false`, and all three are dropped on a real-time alert.\n\n" +
 					"Not accepted on a real-time alert, which keeps no state to recover from. Making an alert " +
 					"real-time while the server holds `true` and this attribute is unset plans cleanly but fails " +
 					"at apply, asking for `notify_on_recovery = false`.",
+			},
+			"recovery_destinations": schema.SetAttribute{
+				Optional:      true,
+				Computed:      true,
+				ElementType:   types.StringType,
+				PlanModifiers: []planmodifier.Set{setplanmodifier.UseStateForUnknown()},
+				Description: "Destinations the recovery notification goes to, when it should not follow the firing. " +
+					"Empty sends it to the alert's own `destinations`. A PagerDuty, Opsgenie or ServiceNow " +
+					"destination recovers by closing the ticket its own firing opened, so the server refuses one " +
+					"here unless it is also in `destinations`, where it already receives the recovery.\n\n" +
+					"Needs `notify_on_recovery = true`, and is not accepted on a real-time alert. " + keepServerValueDoc,
+			},
+			"keep_firing_for": schema.Int64Attribute{
+				Optional:      true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
+				Description: "Seconds the condition must stay clear before a firing alert recovers, from 0 to " +
+					"86400 (one day). 0, the server default, recovers on the first clear evaluation. Like " +
+					"Prometheus' `keep_firing_for`, it stops a flapping condition from sending a recovery and a " +
+					"new firing every few minutes.\n\n" +
+					"Not accepted on a real-time alert. " + keepServerValueDoc,
+			},
+			"suppress_repeats": schema.BoolAttribute{
+				Optional:      true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+				Description: "Notify once per state change instead of on every evaluation that fires: once when " +
+					"the alert starts firing (or its level changes) and, with `notify_on_recovery`, once when it " +
+					"recovers. `silence` is still checked first.\n\n" +
+					"Honored by OpenObserve Enterprise only; other builds ignore it. Not accepted on a real-time " +
+					"alert. " + keepServerValueDoc,
+			},
+			"runbook_url": schema.StringAttribute{
+				Optional:      true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.String{keepStateWhenUnset{}},
+				Validators:    []validator.String{runbookURLValidator{}},
+				Description: "Link to the runbook for this alert, copied onto every on-call page it opens. Must be " +
+					"an `http://` or `https://` URL with a host, at most 2048 characters. Set it to `\"\"` to " +
+					"remove the link. " + keepServerValueDoc,
+			},
+			"oncall_team": schema.StringAttribute{
+				Optional:      true,
+				Computed:      true,
+				PlanModifiers: []planmodifier.String{keepStateWhenUnset{}},
+				Validators:    []validator.String{clearableTrimmedValidator{}},
+				Description: "ID of the on-call team this alert pages, overriding the team the server would find " +
+					"from the alert's dimensions. The server refuses an ID that is not an on-call team of the " +
+					"organization. Set it to `\"\"` to go back to ownership discovery. Needs OpenObserve " +
+					"Enterprise with on-call. " + keepServerValueDoc,
 			},
 			"tz_offset": schema.Int64Attribute{
 				Optional:    true,
@@ -468,6 +528,21 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 						Description: "Warning-level value for the PromQL comparison, sharing the operator of " +
 							"`promql_condition`. Omit for a single-level alert.",
 					},
+					"promql_rule_mode": schema.BoolAttribute{
+						Optional:      true,
+						Computed:      true,
+						PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+						Description: "Evaluate `promql` the way a Prometheus alerting rule does: every series the " +
+							"expression returns is firing, so the comparison belongs in the expression itself " +
+							"(`rate(errors[5m]) > 0.1`). Needs `type = \"promql\"` and `stream_type = \"metrics\"`, " +
+							"and the server refuses it together with `promql_condition`, `promql_warning_value`, " +
+							"`aggregation`, `multi_time_range`, `trigger_condition.warning_threshold` or a trigger " +
+							"other than `>= 1` (the default) or `> 0`. With a `pending_period_sec`, set " +
+							"`promql_multi_alert = true` too: the server turns it on so that each series waits out " +
+							"its own pending period.\n\n" +
+							"Leave it unset to keep whatever the server holds across updates, as with " +
+							"`notify_on_recovery`. It is dropped when the alert stops being a PromQL alert.",
+					},
 					"promql_multi_alert": schema.BoolAttribute{
 						Optional: true,
 						Description: "Evaluate and notify per returned series rather than collapsing the query to " +
@@ -490,8 +565,9 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				},
 				Blocks: map[string]schema.Block{
 					"promql_condition": schema.SingleNestedBlock{
-						Description: "Comparison applied to the PromQL result. Required when `type` is `promql`.",
-						Attributes:  conditionAttributes(false, false),
+						Description: "Comparison applied to the PromQL result. Required when `type` is `promql`, unless " +
+							"`promql_rule_mode` is on, which refuses it.",
+						Attributes: conditionAttributes(false, false),
 					},
 					"aggregation": schema.SingleNestedBlock{
 						Description: "Aggregation applied before the threshold comparison. Only used when `type` is `custom`.",
@@ -706,7 +782,11 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 func (r *AlertResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var config AlertResourceModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
-	if resp.Diagnostics.HasError() || config.QueryCondition == nil {
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	validateRecoverySettings(&config, &resp.Diagnostics)
+	if config.QueryCondition == nil {
 		return
 	}
 
@@ -869,6 +949,8 @@ func (r *AlertResource) ValidateConfig(ctx context.Context, req resource.Validat
 		)
 	}
 
+	validatePromQLRuleMode(&config, &resp.Diagnostics)
+
 	if config.TriggerCondition != nil &&
 		config.TriggerCondition.FrequencyType.ValueString() == "cron" &&
 		config.TriggerCondition.Cron.IsNull() && !config.TriggerCondition.Cron.IsUnknown() {
@@ -920,10 +1002,19 @@ func (r *AlertResource) Create(ctx context.Context, req resource.CreateRequest, 
 	plan.AlertID = types.StringValue(alertID)
 	plan.ID = types.StringValue(alertResourceID(org, alertID))
 
+	wanted := plan
+	if plan.QueryCondition != nil {
+		qc := *plan.QueryCondition
+		wanted.QueryCondition = &qc
+	}
 	r.refresh(ctx, org, alertID, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	// A warning, not an error: an error on create taints the alert, and
+	// every later apply would destroy and recreate it. The next plan shows
+	// the setting as a change, and that update fails with the same message.
+	reportSettingsNotKept(&wanted, &plan, &resp.Diagnostics, true)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -1012,6 +1103,7 @@ func (r *AlertResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	}
 	planned.restore(&config, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	reportSettingsNotKept(&config, &plan, &resp.Diagnostics, false)
 }
 
 // plannedUnsetValues holds the planned values of the Optional+Computed
@@ -1023,19 +1115,34 @@ func (r *AlertResource) Update(ctx context.Context, req resource.UpdateRequest, 
 // requires of a known planned value, and the next refresh reads the server's
 // without a diff, because the attribute is computed and unset.
 type plannedUnsetValues struct {
-	notifyOnRecovery types.Bool
-	destinations     types.Set
-	operator         types.String
-	threshold        types.Int64
-	groupBy          *types.List
+	notifyOnRecovery     types.Bool
+	destinations         types.Set
+	recoveryDestinations types.Set
+	keepFiringFor        types.Int64
+	suppressRepeats      types.Bool
+	runbookURL           types.String
+	oncallTeam           types.String
+	operator             types.String
+	threshold            types.Int64
+	groupBy              *types.List
+	promqlRuleMode       *types.Bool
 }
 
 func plannedUnsetValuesOf(plan *AlertResourceModel) plannedUnsetValues {
 	p := plannedUnsetValues{
-		notifyOnRecovery: plan.NotifyOnRecovery,
-		destinations:     plan.Destinations,
-		operator:         types.StringUnknown(),
-		threshold:        types.Int64Unknown(),
+		notifyOnRecovery:     plan.NotifyOnRecovery,
+		destinations:         plan.Destinations,
+		recoveryDestinations: plan.RecoveryDestinations,
+		keepFiringFor:        plan.KeepFiringFor,
+		suppressRepeats:      plan.SuppressRepeats,
+		runbookURL:           plan.RunbookURL,
+		oncallTeam:           plan.OncallTeam,
+		operator:             types.StringUnknown(),
+		threshold:            types.Int64Unknown(),
+	}
+	if plan.QueryCondition != nil {
+		ruleMode := plan.QueryCondition.PromQLRuleMode
+		p.promqlRuleMode = &ruleMode
 	}
 	if plan.TriggerCondition != nil {
 		p.operator = plan.TriggerCondition.Operator
@@ -1054,6 +1161,26 @@ func (p plannedUnsetValues) restore(config, model *AlertResourceModel) {
 	}
 	if config.Destinations.IsNull() && !p.destinations.IsUnknown() {
 		model.Destinations = p.destinations
+	}
+	if config.RecoveryDestinations.IsNull() && !p.recoveryDestinations.IsUnknown() {
+		model.RecoveryDestinations = p.recoveryDestinations
+	}
+	if config.KeepFiringFor.IsNull() && !p.keepFiringFor.IsUnknown() {
+		model.KeepFiringFor = p.keepFiringFor
+	}
+	if config.SuppressRepeats.IsNull() && !p.suppressRepeats.IsUnknown() {
+		model.SuppressRepeats = p.suppressRepeats
+	}
+	if config.RunbookURL.IsNull() && !p.runbookURL.IsUnknown() {
+		model.RunbookURL = p.runbookURL
+	}
+	if config.OncallTeam.IsNull() && !p.oncallTeam.IsUnknown() {
+		model.OncallTeam = p.oncallTeam
+	}
+	if p.promqlRuleMode != nil && !p.promqlRuleMode.IsUnknown() &&
+		config.QueryCondition != nil && config.QueryCondition.PromQLRuleMode.IsNull() &&
+		model.QueryCondition != nil {
+		model.QueryCondition.PromQLRuleMode = *p.promqlRuleMode
 	}
 	if config.TriggerCondition != nil && model.TriggerCondition != nil {
 		if config.TriggerCondition.Operator.IsNull() && !p.operator.IsUnknown() {
@@ -1075,20 +1202,21 @@ func (p plannedUnsetValues) restore(config, model *AlertResourceModel) {
 // configuration does not decide.
 //
 // The update endpoint replaces the whole alert, so any field the body leaves
-// out is reset. A configured notify_on_recovery is sent as written. An unset
-// one, and the settings that have no attribute (recovery_destinations,
-// keep_firing_for, suppress_repeats, runbook_url, oncall_team,
-// incident_title_template, promql_rule_mode), are read from the server just
-// before the write, and so are the Optional+Computed attributes left unset
-// (see keepServerComputed). State is not used for this: it may be stale (a plan made
-// with -refresh=false) or written by a release that did not know the
-// attribute.
+// out is reset. A configured setting is sent as written. An unset one
+// (notify_on_recovery, recovery_destinations, keep_firing_for,
+// suppress_repeats, runbook_url, oncall_team, promql_rule_mode, and the
+// Optional+Computed attributes of keepServerComputed) is read from the server
+// just before the write, and so is incident_title_template, which has no
+// attribute yet. State is not used for this:
+// it may be stale (a plan made with -refresh=false) or written by a release
+// that did not know the attribute.
 //
-// A real-time alert can carry none of these, and the server rejects an alert
-// that does. The settings without an attribute are dropped for one, because
-// the configuration has no way to clear them. notify_on_recovery is never
-// dropped silently: when the server holds true and the configuration does not
-// say, the update stops and asks for an explicit `false`.
+// A real-time alert can carry no recovery settings, and the server rejects an
+// alert that does. Unset recovery_destinations, keep_firing_for and
+// suppress_repeats are dropped for one: the user asked for a real-time alert
+// and did not ask to keep them. notify_on_recovery is never dropped silently:
+// when the server holds true and the configuration does not say, the update
+// stops and asks for an explicit `false`.
 func (r *AlertResource) keepUnmanagedSettings(ctx context.Context, org, alertID string, config *AlertResourceModel, body *AlertAPI, diags *diag.Diagnostics) {
 	current, err := r.client.GetAlert(ctx, org, alertID)
 	if err != nil {
@@ -1102,13 +1230,23 @@ func (r *AlertResource) keepUnmanagedSettings(ctx context.Context, org, alertID 
 	}
 	keepServerComputed(config, current, body)
 
-	body.RunbookURL = current.RunbookURL
-	body.OncallTeam = current.OncallTeam
+	if config.RunbookURL.IsNull() {
+		body.RunbookURL = current.RunbookURL
+	}
+	if config.OncallTeam.IsNull() {
+		body.OncallTeam = current.OncallTeam
+	}
+	// incident_title_template has no attribute yet, because no released server
+	// keeps it. It is sent back as the server holds it.
 	body.IncidentTitleTemplate = current.IncidentTitleTemplate
 	// Rule mode only means something on a PromQL alert, and the server ignores
-	// it on any other, so it is kept only while the alert stays PromQL.
-	if body.QueryCondition.QueryType == "promql" && current.QueryCondition.QueryType == "promql" {
-		body.QueryCondition.PromQLRuleMode = current.QueryCondition.PromQLRuleMode
+	// it on any other, so an unset one is kept only while the alert stays
+	// PromQL.
+	if config.QueryCondition == nil || config.QueryCondition.PromQLRuleMode.IsNull() {
+		body.QueryCondition.PromQLRuleMode = false
+		if body.QueryCondition.QueryType == "promql" && current.QueryCondition.QueryType == "promql" {
+			body.QueryCondition.PromQLRuleMode = current.QueryCondition.PromQLRuleMode
+		}
 	}
 
 	configured := config.NotifyOnRecovery
@@ -1127,14 +1265,30 @@ func (r *AlertResource) keepUnmanagedSettings(ctx context.Context, org, alertID 
 	body.NotifyOnRecovery = &notify
 
 	if body.IsRealTime {
+		if config.KeepFiringFor.IsNull() {
+			body.KeepFiringFor = 0
+		}
+		if config.SuppressRepeats.IsNull() {
+			body.SuppressRepeats = false
+		}
+		if config.RecoveryDestinations.IsNull() {
+			body.RecoveryDestinations = nil
+		}
 		return
 	}
-	body.KeepFiringFor = current.KeepFiringFor
-	body.SuppressRepeats = current.SuppressRepeats
+	if config.KeepFiringFor.IsNull() {
+		body.KeepFiringFor = current.KeepFiringFor
+	}
+	if config.SuppressRepeats.IsNull() {
+		body.SuppressRepeats = current.SuppressRepeats
+	}
 	// The server refuses recovery destinations without the switch, so turning
-	// recovery off in the configuration drops them along with it.
-	if notify {
-		body.RecoveryDestinations = current.RecoveryDestinations
+	// recovery off in the configuration drops unset ones along with it.
+	if config.RecoveryDestinations.IsNull() {
+		body.RecoveryDestinations = nil
+		if notify {
+			body.RecoveryDestinations = current.RecoveryDestinations
+		}
 	}
 }
 
@@ -1284,6 +1438,14 @@ func (r *AlertResource) alertFromModel(ctx context.Context, model *AlertResource
 		PendingPeriodSec: model.PendingPeriodSec.ValueInt64(),
 		NotifyOnRecovery: optBool(model.NotifyOnRecovery),
 		Tags:             stringsFromSet(ctx, model.Tags, diags),
+		// Unset, these send the zero value here; an update replaces it with
+		// the server's in keepUnmanagedSettings, and a create takes the
+		// server default, which is the zero value.
+		RecoveryDestinations: stringsFromSet(ctx, model.RecoveryDestinations, diags),
+		KeepFiringFor:        model.KeepFiringFor.ValueInt64(),
+		SuppressRepeats:      model.SuppressRepeats.ValueBool(),
+		RunbookURL:           clearableString(model.RunbookURL),
+		OncallTeam:           clearableString(model.OncallTeam),
 	}
 	if folderID != "" {
 		alert.FolderID = &folderID
@@ -1332,6 +1494,7 @@ func queryConditionFromModel(ctx context.Context, model *AlertQueryConditionMode
 		PromQL:             optString(model.PromQL),
 		PromQLWarningValue: optFloat64(model.PromQLWarningValue),
 		PromQLMultiAlert:   model.PromQLMultiAlert.ValueBool(),
+		PromQLRuleMode:     model.PromQLRuleMode.ValueBool(),
 		VRLFunction:        optString(model.VRLFunction),
 		SearchEventType:    optString(model.SearchEventType),
 	}
@@ -1658,6 +1821,11 @@ func (r *AlertResource) applyAlertToModel(ctx context.Context, alert *AlertAPI, 
 	model.TZOffset = types.Int64Value(int64(alert.TZOffset))
 	model.PendingPeriodSec = types.Int64Value(alert.PendingPeriodSec)
 	model.NotifyOnRecovery = types.BoolValue(alert.NotifyOnRecovery != nil && *alert.NotifyOnRecovery)
+	model.RecoveryDestinations = setFromStrings(ctx, alert.RecoveryDestinations, diags)
+	model.KeepFiringFor = types.Int64Value(alert.KeepFiringFor)
+	model.SuppressRepeats = types.BoolValue(alert.SuppressRepeats)
+	model.RunbookURL = clearedStringToModel(model.RunbookURL, alert.RunbookURL)
+	model.OncallTeam = clearedStringToModel(model.OncallTeam, alert.OncallTeam)
 	model.Template = stringFromPtr(alert.Template)
 	model.Owner = stringFromPtr(alert.Owner)
 	model.Priority = int64FromPtr(alert.Priority)
@@ -1712,6 +1880,7 @@ func queryConditionToModel(ctx context.Context, api *AlertQueryConditionAPI, pri
 		PromQL:             stringFromPtr(api.PromQL),
 		PromQLWarningValue: float64FromPtr(api.PromQLWarningValue),
 		PromQLMultiAlert:   boolPreserveNull(priorPromQLMultiAlert, api.PromQLMultiAlert),
+		PromQLRuleMode:     types.BoolValue(api.PromQLRuleMode),
 		Conditions:         conditionsToModel(priorConditions, api.Conditions, diags),
 		VRLFunction:        stringFromPtr(api.VRLFunction),
 		SearchEventType:    stringFromPtr(api.SearchEventType),
@@ -1810,4 +1979,342 @@ func triggerConditionToModel(api *AlertTriggerConditionAPI) *AlertTriggerConditi
 
 func alertResourceID(orgID, alertID string) string {
 	return fmt.Sprintf("%s/%s", orgID, alertID)
+}
+
+// keepServerValueDoc ends the description of every alert setting that keeps
+// the server's value while unset.
+const keepServerValueDoc = "Leave it unset to keep whatever the server holds across updates, so a value set in " +
+	"the UI or through the API is not reset by an unrelated change. Set it to manage the value, and a change " +
+	"made elsewhere then shows as drift. Removing it from a configuration that set it stops managing it and " +
+	"leaves the server value as it is."
+
+// clearableString is what a write sends for an alert string setting that
+// `""` clears. The server refuses an empty runbook_url and treats an empty
+// on-call team as none, so "none" is sent as an absent field.
+func clearableString(v types.String) *string {
+	if v.IsNull() || v.IsUnknown() || v.ValueString() == "" {
+		return nil
+	}
+	s := v.ValueString()
+	return &s
+}
+
+// clearedStringToModel reads back a setting written by clearableString. The
+// server reports a cleared setting as absent, which stays `""` when the model
+// already held `""`, the value a configuration uses to clear it; otherwise
+// the plan would show a change from "" to null on every run.
+func clearedStringToModel(prior types.String, server *string) types.String {
+	if server == nil || *server == "" {
+		if !prior.IsNull() && !prior.IsUnknown() && prior.ValueString() == "" {
+			return types.StringValue("")
+		}
+		return types.StringNull()
+	}
+	return types.StringValue(*server)
+}
+
+// runbookURLValidator applies the server's runbook link rules at plan time:
+// an http or https URL with a host, no whitespace, at most 2048 characters.
+// `""` passes, because it clears the link.
+type runbookURLValidator struct{}
+
+func (runbookURLValidator) Description(_ context.Context) string {
+	return "must be an http:// or https:// URL with a host, or empty"
+}
+
+func (v runbookURLValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (runbookURLValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() || req.ConfigValue.ValueString() == "" {
+		return
+	}
+	if problem := runbookURLProblem(req.ConfigValue.ValueString()); problem != "" {
+		resp.Diagnostics.AddAttributeError(req.Path, "Invalid runbook_url",
+			fmt.Sprintf("%s. The server refuses a runbook link that is not an http:// or https:// URL with a host.", problem))
+	}
+}
+
+// runbookURLProblem mirrors the server's normalize_runbook_url and returns
+// why raw is refused, or "" when it is accepted. Unlike the server it does
+// not trim: a value with leading or trailing spaces is stored as sent, and the
+// server's check would pass it, but it is almost certainly a paste accident.
+func runbookURLProblem(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return "runbook_url is blank"
+	}
+	if len([]rune(raw)) > 2048 {
+		return "runbook_url is longer than 2048 characters"
+	}
+	if strings.ContainsFunc(raw, unicode.IsSpace) {
+		return "runbook_url contains whitespace"
+	}
+	scheme, rest, ok := strings.Cut(raw, "://")
+	if !ok || (!strings.EqualFold(scheme, "http") && !strings.EqualFold(scheme, "https")) {
+		return "runbook_url must start with http:// or https://"
+	}
+	host := rest
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		host = rest[:i]
+	}
+	if host == "" {
+		return "runbook_url has no host"
+	}
+	return ""
+}
+
+// validateRecoverySettings catches the recovery settings the server refuses:
+// any of them on a real-time alert, which keeps no state to recover from,
+// recovery destinations with recovery switched off, and keep_firing_for
+// outside 0 to one day.
+func validateRecoverySettings(config *AlertResourceModel, diags *diag.Diagnostics) {
+	realTime := knownAndSet(config.IsRealTime) && config.IsRealTime.ValueBool()
+	if knownAndSet(config.KeepFiringFor) {
+		secs := config.KeepFiringFor.ValueInt64()
+		if secs < 0 || secs > keepFiringForMaxSecs {
+			diags.AddAttributeError(path.Root("keep_firing_for"), "keep_firing_for out of range",
+				fmt.Sprintf("`keep_firing_for` is %d. It is in seconds and must be between 0 and %d (one day).",
+					secs, keepFiringForMaxSecs))
+		} else if secs != 0 && realTime {
+			diags.AddAttributeError(path.Root("keep_firing_for"), "keep_firing_for does not apply to a real-time alert",
+				"A real-time alert keeps no state between records, so it never recovers and the server rejects "+
+					"a non-zero `keep_firing_for` on one. Remove it, or drop `is_real_time`.")
+		}
+	}
+	if knownAndSet(config.SuppressRepeats) && config.SuppressRepeats.ValueBool() && realTime {
+		diags.AddAttributeError(path.Root("suppress_repeats"), "suppress_repeats does not apply to a real-time alert",
+			"A real-time alert keeps no state, so it has no last notification to compare against and the server "+
+				"rejects `suppress_repeats = true` on one. Remove it, or drop `is_real_time`.")
+	}
+	if knownAndSet(config.RecoveryDestinations) && len(config.RecoveryDestinations.Elements()) > 0 {
+		switch {
+		case realTime:
+			diags.AddAttributeError(path.Root("recovery_destinations"),
+				"recovery_destinations does not apply to a real-time alert",
+				"A real-time alert never recovers, so it sends no recovery notification. Remove "+
+					"`recovery_destinations`, or drop `is_real_time`.")
+		case knownAndSet(config.NotifyOnRecovery) && !config.NotifyOnRecovery.ValueBool():
+			diags.AddAttributeError(path.Root("recovery_destinations"), "recovery_destinations needs notify_on_recovery",
+				"`notify_on_recovery` is `false`, so no recovery notification is sent and the server refuses "+
+					"recovery destinations. Set `notify_on_recovery = true`, or remove `recovery_destinations`.")
+		}
+	}
+}
+
+// keepFiringForMaxSecs is the server's ceiling on keep_firing_for.
+const keepFiringForMaxSecs = 24 * 60 * 60
+
+// validatePromQLRuleMode catches a configured rule mode on an alert that is not
+// PromQL or not on a metrics stream.
+func validatePromQLRuleMode(config *AlertResourceModel, diags *diag.Diagnostics) {
+	qc := config.QueryCondition
+	if qc == nil || !knownAndSet(qc.PromQLRuleMode) || !qc.PromQLRuleMode.ValueBool() {
+		return
+	}
+	attr := path.Root("query_condition").AtName("promql_rule_mode")
+	if !qc.QueryType.IsUnknown() && qc.QueryType.ValueString() != "promql" {
+		diags.AddAttributeError(attr, "Rule mode needs a PromQL alert",
+			"`promql_rule_mode` evaluates a PromQL expression, so it needs `query_condition.type = \"promql\"`.")
+		return
+	}
+	if knownAndSet(config.StreamType) && config.StreamType.ValueString() != "metrics" {
+		diags.AddAttributeError(attr, "Rule mode needs a metrics stream",
+			"The server refuses `promql_rule_mode` unless `stream_type` is `metrics`.")
+	}
+	// The checks that depend on values the plan can take from the server
+	// (the trigger, a rule mode switched on in the UI) run in ModifyPlan; see
+	// ruleModeConflicts.
+}
+
+// reportSettingsNotKept reports a write in which the server did not keep a
+// setting the configuration sets: an error, or a warning when warnOnly. A server older than the setting drops a field it
+// does not know without an error, and Terraform would otherwise report the
+// difference as a provider bug ("inconsistent result after apply"). State
+// already holds what the server kept, so the next plan shows the difference.
+func reportSettingsNotKept(want, got *AlertResourceModel, diags *diag.Diagnostics, warnOnly bool) {
+	type setting struct {
+		path    path.Path
+		want    attr.Value
+		got     attr.Value
+		release string
+		keep    func() // writes the wanted value into got
+	}
+	settings := []setting{
+		{path.Root("recovery_destinations"), want.RecoveryDestinations, got.RecoveryDestinations, "v1.1.0",
+			func() { got.RecoveryDestinations = want.RecoveryDestinations }},
+		{path.Root("keep_firing_for"), want.KeepFiringFor, got.KeepFiringFor, "v1.1.0",
+			func() { got.KeepFiringFor = want.KeepFiringFor }},
+		{path.Root("suppress_repeats"), want.SuppressRepeats, got.SuppressRepeats, "v1.2.0-rc1",
+			func() { got.SuppressRepeats = want.SuppressRepeats }},
+		{path.Root("runbook_url"), want.RunbookURL, got.RunbookURL, "v1.1.0",
+			func() { got.RunbookURL = want.RunbookURL }},
+		{path.Root("oncall_team"), want.OncallTeam, got.OncallTeam, "v1.1.0",
+			func() { got.OncallTeam = want.OncallTeam }},
+	}
+	if want.QueryCondition != nil && got.QueryCondition != nil {
+		settings = append(settings, setting{path.Root("query_condition").AtName("promql_rule_mode"),
+			want.QueryCondition.PromQLRuleMode, got.QueryCondition.PromQLRuleMode, "v1.2.0-rc1",
+			func() { got.QueryCondition.PromQLRuleMode = want.QueryCondition.PromQLRuleMode }})
+	}
+	for _, s := range settings {
+		if !knownAndSet(s.want) || s.want.Equal(s.got) {
+			continue
+		}
+		if w, ok := s.want.(types.String); ok && w.ValueString() == "" && s.got.IsNull() {
+			continue
+		}
+		detail := fmt.Sprintf("The alert was saved, but the server reports %s where the configuration sets %s. "+
+			"OpenObserve servers older than the setting ignore it: this one needs OpenObserve %s or "+
+			"newer. Upgrade the server, or remove the attribute from the configuration.",
+			s.got, s.want, s.release)
+		if warnOnly {
+			// State must hold the planned value, or Terraform fails the create
+			// as an inconsistent result and taints the alert. The next refresh
+			// reads what the server kept, and the plan shows the difference.
+			s.keep()
+			diags.AddAttributeWarning(s.path, "The server did not keep this setting", detail)
+		} else {
+			diags.AddAttributeError(s.path, "The server did not keep this setting", detail)
+		}
+	}
+}
+
+// clearableTrimmedValidator accepts "" (clear) or a value with no leading or
+// trailing whitespace. The server treats a blank value as none, which the
+// provider would otherwise report as a setting the server did not keep.
+type clearableTrimmedValidator struct{}
+
+func (clearableTrimmedValidator) Description(context.Context) string {
+	return "must be empty, or have no leading or trailing whitespace"
+}
+
+func (v clearableTrimmedValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (clearableTrimmedValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if !knownAndSet(req.ConfigValue) {
+		return
+	}
+	if v := req.ConfigValue.ValueString(); v != strings.TrimSpace(v) {
+		resp.Diagnostics.AddAttributeError(req.Path, "Leading or trailing whitespace",
+			fmt.Sprintf("%q has leading or trailing whitespace. Use \"\" to clear the setting.", v))
+	}
+}
+
+// ModifyPlan catches what depends on the server's current values or on
+// whether the alert is new, which ValidateConfig cannot see.
+func (r *AlertResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+	var plan, config AlertResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// An unset notify_on_recovery is the server default, false, on a new
+	// alert, and the server's value on an existing one, which the plan holds.
+	// The server refuses recovery destinations without it. A configured
+	// `false` is caught in ValidateConfig.
+	isCreate := req.State.Raw.IsNull()
+	if config.NotifyOnRecovery.IsNull() &&
+		knownAndSet(config.RecoveryDestinations) && len(config.RecoveryDestinations.Elements()) > 0 &&
+		(isCreate || (knownAndSet(plan.NotifyOnRecovery) && !plan.NotifyOnRecovery.ValueBool())) {
+		resp.Diagnostics.AddAttributeError(path.Root("recovery_destinations"),
+			"recovery_destinations needs notify_on_recovery",
+			"Recovery notifications are off for this alert (a new alert starts with them off), and the server "+
+				"refuses recovery destinations without them. Set `notify_on_recovery = true`.")
+	}
+
+	ruleModeConflicts(&plan, &config, isCreate, &resp.Diagnostics)
+}
+
+// ruleModeConflicts catches what the server refuses or rewrites alongside
+// rule mode, on the planned values: rule mode itself may come from the server
+// (switched on in the UI, with the attribute unset), and so may the trigger's
+// operator and threshold on an update. A rewrite would otherwise fail the
+// apply with "Provider produced inconsistent result".
+func ruleModeConflicts(plan, config *AlertResourceModel, isCreate bool, diags *diag.Diagnostics) {
+	qc := plan.QueryCondition
+	if qc == nil || !knownAndSet(qc.PromQLRuleMode) || !qc.PromQLRuleMode.ValueBool() ||
+		qc.QueryType.ValueString() != "promql" {
+		return
+	}
+	held := config.QueryCondition == nil || config.QueryCondition.PromQLRuleMode.IsNull()
+	why := "With `promql_rule_mode`"
+	if held {
+		why = "This alert has `promql_rule_mode` switched on in OpenObserve (the attribute is unset, so the " +
+			"server's value is kept). With rule mode"
+	}
+	pending := knownAndSet(plan.PendingPeriodSec) && plan.PendingPeriodSec.ValueInt64() > 0
+	if pending && !qc.PromQLMultiAlert.IsUnknown() && !(knownAndSet(qc.PromQLMultiAlert) && qc.PromQLMultiAlert.ValueBool()) {
+		diags.AddAttributeError(path.Root("query_condition").AtName("promql_multi_alert"),
+			"Rule mode with a pending period is a multi-alert",
+			why+" and a `pending_period_sec`, the server turns on `promql_multi_alert` so that each series "+
+				"waits out its own pending period. Set `query_condition.promql_multi_alert = true`.")
+	}
+	if pending && knownAndSet(plan.CreatesIncident) && plan.CreatesIncident.ValueBool() {
+		diags.AddAttributeError(path.Root("creates_incident"), "Rule mode with a pending period cannot open incidents",
+			why+" and a `pending_period_sec` the alert is a per-series multi-alert, and the server refuses "+
+				"`creates_incident = true` on a multi-alert.")
+	}
+	// Every returned series is firing, so the threshold lives in the
+	// expression and the server refuses anything else that would compare.
+	conflicts := []struct {
+		set  bool
+		path path.Path
+		name string
+	}{
+		{qc.PromQLCondition != nil && !qc.PromQLCondition.Column.IsNull(),
+			path.Root("query_condition").AtName("promql_condition"), "`promql_condition`"},
+		{knownAndSet(qc.PromQLWarningValue), path.Root("query_condition").AtName("promql_warning_value"), "`promql_warning_value`"},
+		{qc.Aggregation != nil && !qc.Aggregation.Function.IsNull(),
+			path.Root("query_condition").AtName("aggregation"), "`aggregation`"},
+		{knownAndSet(qc.MultiTimeRange) && len(qc.MultiTimeRange.Elements()) > 0,
+			path.Root("query_condition").AtName("multi_time_range"), "`multi_time_range`"},
+		{plan.TriggerCondition != nil && knownAndSet(plan.TriggerCondition.WarningThreshold),
+			path.Root("trigger_condition").AtName("warning_threshold"), "`warning_threshold`"},
+	}
+	for _, c := range conflicts {
+		if c.set {
+			diags.AddAttributeError(c.path, "Not accepted in rule mode",
+				fmt.Sprintf("%s every series the expression returns is firing, so the comparison belongs in "+
+					"`promql` itself, for example `rate(errors[5m]) > 0.1`. The server refuses %s alongside it. "+
+					"Remove it, or set `promql_rule_mode = false`.", why, c.name))
+		}
+	}
+
+	tc := plan.TriggerCondition
+	if tc == nil {
+		return
+	}
+	// On create an unset operator and threshold are planned unknown, and the
+	// provider sends `>=` and `1`. On update they are planned from state, which
+	// is what an update sends for them (see keepServerComputed).
+	op, threshold := tc.Operator, tc.Threshold
+	if isCreate && op.IsUnknown() {
+		op = types.StringValue(">=")
+	}
+	if isCreate && threshold.IsUnknown() {
+		threshold = types.Int64Value(1)
+	}
+	if !knownAndSet(op) || !knownAndSet(threshold) {
+		return
+	}
+	o, n := op.ValueString(), threshold.ValueInt64()
+	if (o == ">=" && n == 1) || (o == ">" && n == 0) {
+		return
+	}
+	detail := fmt.Sprintf("%s the alert fires when any series is returned, and the server accepts only a `>= 1` "+
+		"or `> 0` trigger, but this one is `%s %d`.", why, o, n)
+	if o == "=" && n == 0 {
+		detail = why + " every series the expression returns is firing, and the server rewrites an `= 0` " +
+			"trigger as `>= 1`."
+	}
+	diags.AddAttributeError(path.Root("trigger_condition").AtName("threshold"), "Rule mode fires on any returned series",
+		detail+" Set `operator = \">=\"` and `threshold = 1`.")
 }

@@ -414,9 +414,10 @@ func TestAlertDataSourceByIDResolvesFolder(t *testing.T) {
 	empty := tftypes.NewValue(schemaResp.Schema.Type().TerraformType(ctx), nil)
 	cfg := tfsdk.State{Schema: schemaResp.Schema, Raw: empty}
 	model := AlertDataSourceModel{
-		AlertID:      types.StringValue("A1"),
-		Destinations: types.SetNull(types.StringType),
-		Tags:         types.SetNull(types.StringType),
+		AlertID:              types.StringValue("A1"),
+		Destinations:         types.SetNull(types.StringType),
+		Tags:                 types.SetNull(types.StringType),
+		RecoveryDestinations: types.SetNull(types.StringType),
 	}
 	if diags := cfg.Set(ctx, &model); diags.HasError() {
 		t.Fatalf("building config: %v", diags)
