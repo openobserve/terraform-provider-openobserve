@@ -1011,11 +1011,11 @@ func (r *AlertResource) Create(ctx context.Context, req resource.CreateRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 	// A warning, not an error: an error on create taints the alert, and
 	// every later apply would destroy and recreate it. The next plan shows
 	// the setting as a change, and that update fails with the same message.
 	reportSettingsNotKept(&wanted, &plan, &resp.Diagnostics, true)
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 func (r *AlertResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -2105,9 +2105,8 @@ func validateRecoverySettings(config *AlertResourceModel, diags *diag.Diagnostic
 // keepFiringForMaxSecs is the server's ceiling on keep_firing_for.
 const keepFiringForMaxSecs = 24 * 60 * 60
 
-// validatePromQLRuleMode catches rule mode where the server refuses it, and
-// the combinations the server rewrites on save, which would otherwise fail the
-// apply with "Provider produced inconsistent result".
+// validatePromQLRuleMode catches a configured rule mode on an alert that is not
+// PromQL or not on a metrics stream.
 func validatePromQLRuleMode(config *AlertResourceModel, diags *diag.Diagnostics) {
 	qc := config.QueryCondition
 	if qc == nil || !knownAndSet(qc.PromQLRuleMode) || !qc.PromQLRuleMode.ValueBool() {
@@ -2123,69 +2122,9 @@ func validatePromQLRuleMode(config *AlertResourceModel, diags *diag.Diagnostics)
 		diags.AddAttributeError(attr, "Rule mode needs a metrics stream",
 			"The server refuses `promql_rule_mode` unless `stream_type` is `metrics`.")
 	}
-	if knownAndSet(config.PendingPeriodSec) && config.PendingPeriodSec.ValueInt64() > 0 &&
-		!(knownAndSet(qc.PromQLMultiAlert) && qc.PromQLMultiAlert.ValueBool()) && !qc.PromQLMultiAlert.IsUnknown() {
-		diags.AddAttributeError(path.Root("query_condition").AtName("promql_multi_alert"),
-			"Rule mode with a pending period is a multi-alert",
-			"With `promql_rule_mode` and a `pending_period_sec`, the server turns on `promql_multi_alert` so "+
-				"that each series waits out its own pending period. Set `promql_multi_alert = true` to match.")
-	}
-	// Every returned series is firing, so the threshold lives in the
-	// expression and the server refuses anything else that would compare.
-	conflicts := []struct {
-		set  bool
-		path path.Path
-		name string
-	}{
-		{qc.PromQLCondition != nil, path.Root("query_condition").AtName("promql_condition"), "`promql_condition`"},
-		{knownAndSet(qc.PromQLWarningValue), path.Root("query_condition").AtName("promql_warning_value"), "`promql_warning_value`"},
-		{qc.Aggregation != nil, path.Root("query_condition").AtName("aggregation"), "`aggregation`"},
-		{knownAndSet(qc.MultiTimeRange) && len(qc.MultiTimeRange.Elements()) > 0,
-			path.Root("query_condition").AtName("multi_time_range"), "`multi_time_range`"},
-		{config.TriggerCondition != nil && knownAndSet(config.TriggerCondition.WarningThreshold),
-			path.Root("trigger_condition").AtName("warning_threshold"), "`warning_threshold`"},
-	}
-	for _, c := range conflicts {
-		if c.set {
-			diags.AddAttributeError(c.path, "Not accepted in rule mode",
-				fmt.Sprintf("In `promql_rule_mode` every series the expression returns is firing, so the "+
-					"comparison belongs in `promql` itself, for example `rate(errors[5m]) > 0.1`. The server "+
-					"refuses %s alongside it. Remove it, or turn rule mode off.", c.name))
-		}
-	}
-	if knownAndSet(config.PendingPeriodSec) && config.PendingPeriodSec.ValueInt64() > 0 &&
-		knownAndSet(config.CreatesIncident) && config.CreatesIncident.ValueBool() {
-		diags.AddAttributeError(path.Root("creates_incident"), "Rule mode with a pending period cannot open incidents",
-			"With `promql_rule_mode` and a `pending_period_sec` the alert is a per-series multi-alert, and the "+
-				"server refuses `creates_incident = true` on a multi-alert. Remove one of the three.")
-	}
-	// The provider fills in `>=` and `1` for an unset operator and threshold,
-	// so a partly configured trigger is checked with those.
-	tc := config.TriggerCondition
-	if tc == nil || tc.Operator.IsUnknown() || tc.Threshold.IsUnknown() || (tc.Operator.IsNull() && tc.Threshold.IsNull()) {
-		return
-	}
-	op, threshold := ">=", int64(1)
-	if !tc.Operator.IsNull() {
-		op = tc.Operator.ValueString()
-	}
-	if !tc.Threshold.IsNull() {
-		threshold = tc.Threshold.ValueInt64()
-	}
-	switch {
-	case (op == ">=" && threshold == 1) || (op == ">" && threshold == 0):
-	case op == "=" && threshold == 0:
-		diags.AddAttributeError(path.Root("trigger_condition").AtName("threshold"),
-			"Rule mode fires on any returned series",
-			"In rule mode every series the expression returns is firing, and the server replaces an "+
-				"`= 0` trigger with `>= 1`. Remove `operator` and `threshold`, or set them to `>=` and `1`.")
-	default:
-		diags.AddAttributeError(path.Root("trigger_condition").AtName("threshold"),
-			"Rule mode fires on any returned series",
-			fmt.Sprintf("The trigger is `%s %d` (an unset operator is `>=` and an unset threshold `1`), but in "+
-				"rule mode the alert fires when any series is returned, and the server accepts only `>= 1` or "+
-				"`> 0`. Remove `operator` and `threshold` to get `>= 1`.", op, threshold))
-	}
+	// The checks that depend on values the plan can take from the server
+	// (the trigger, a rule mode switched on in the UI) run in ModifyPlan; see
+	// ruleModeConflicts.
 }
 
 // reportSettingsNotKept reports a write in which the server did not keep a
@@ -2199,17 +2138,24 @@ func reportSettingsNotKept(want, got *AlertResourceModel, diags *diag.Diagnostic
 		want    attr.Value
 		got     attr.Value
 		release string
+		keep    func() // writes the wanted value into got
 	}
 	settings := []setting{
-		{path.Root("recovery_destinations"), want.RecoveryDestinations, got.RecoveryDestinations, "v1.1.0"},
-		{path.Root("keep_firing_for"), want.KeepFiringFor, got.KeepFiringFor, "v1.1.0"},
-		{path.Root("suppress_repeats"), want.SuppressRepeats, got.SuppressRepeats, "v1.2.0-rc1"},
-		{path.Root("runbook_url"), want.RunbookURL, got.RunbookURL, "v1.1.0"},
-		{path.Root("oncall_team"), want.OncallTeam, got.OncallTeam, "v1.1.0"},
+		{path.Root("recovery_destinations"), want.RecoveryDestinations, got.RecoveryDestinations, "v1.1.0",
+			func() { got.RecoveryDestinations = want.RecoveryDestinations }},
+		{path.Root("keep_firing_for"), want.KeepFiringFor, got.KeepFiringFor, "v1.1.0",
+			func() { got.KeepFiringFor = want.KeepFiringFor }},
+		{path.Root("suppress_repeats"), want.SuppressRepeats, got.SuppressRepeats, "v1.2.0-rc1",
+			func() { got.SuppressRepeats = want.SuppressRepeats }},
+		{path.Root("runbook_url"), want.RunbookURL, got.RunbookURL, "v1.1.0",
+			func() { got.RunbookURL = want.RunbookURL }},
+		{path.Root("oncall_team"), want.OncallTeam, got.OncallTeam, "v1.1.0",
+			func() { got.OncallTeam = want.OncallTeam }},
 	}
 	if want.QueryCondition != nil && got.QueryCondition != nil {
 		settings = append(settings, setting{path.Root("query_condition").AtName("promql_rule_mode"),
-			want.QueryCondition.PromQLRuleMode, got.QueryCondition.PromQLRuleMode, "v1.2.0-rc1"})
+			want.QueryCondition.PromQLRuleMode, got.QueryCondition.PromQLRuleMode, "v1.2.0-rc1",
+			func() { got.QueryCondition.PromQLRuleMode = want.QueryCondition.PromQLRuleMode }})
 	}
 	for _, s := range settings {
 		if !knownAndSet(s.want) || s.want.Equal(s.got) {
@@ -2223,6 +2169,10 @@ func reportSettingsNotKept(want, got *AlertResourceModel, diags *diag.Diagnostic
 			"newer. Upgrade the server, or remove the attribute from the configuration.",
 			s.got, s.want, s.release)
 		if warnOnly {
+			// State must hold the planned value, or Terraform fails the create
+			// as an inconsistent result and taints the alert. The next refresh
+			// reads what the server kept, and the plan shows the difference.
+			s.keep()
 			diags.AddAttributeWarning(s.path, "The server did not keep this setting", detail)
 		} else {
 			diags.AddAttributeError(s.path, "The server did not keep this setting", detail)
@@ -2266,33 +2216,105 @@ func (r *AlertResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanR
 		return
 	}
 
-	// A new alert takes the server default for an unset notify_on_recovery,
-	// which is false, and the server refuses recovery destinations without it.
-	if req.State.Raw.IsNull() && config.NotifyOnRecovery.IsNull() &&
-		knownAndSet(config.RecoveryDestinations) && len(config.RecoveryDestinations.Elements()) > 0 {
+	// An unset notify_on_recovery is the server default, false, on a new
+	// alert, and the server's value on an existing one, which the plan holds.
+	// The server refuses recovery destinations without it. A configured
+	// `false` is caught in ValidateConfig.
+	isCreate := req.State.Raw.IsNull()
+	if config.NotifyOnRecovery.IsNull() &&
+		knownAndSet(config.RecoveryDestinations) && len(config.RecoveryDestinations.Elements()) > 0 &&
+		(isCreate || (knownAndSet(plan.NotifyOnRecovery) && !plan.NotifyOnRecovery.ValueBool())) {
 		resp.Diagnostics.AddAttributeError(path.Root("recovery_destinations"),
 			"recovery_destinations needs notify_on_recovery",
-			"A new alert starts with `notify_on_recovery = false`, and the server refuses recovery destinations "+
-				"without it. Set `notify_on_recovery = true`.")
+			"Recovery notifications are off for this alert (a new alert starts with them off), and the server "+
+				"refuses recovery destinations without them. Set `notify_on_recovery = true`.")
 	}
 
-	// Rule mode held by the server, with the attribute unset: the server turns
-	// on promql_multi_alert when there is a pending period, which an unset
-	// promql_multi_alert cannot plan. ValidateConfig covers a configured
-	// rule mode.
-	if config.QueryCondition == nil || !config.QueryCondition.PromQLRuleMode.IsNull() || plan.QueryCondition == nil {
+	ruleModeConflicts(&plan, &config, isCreate, &resp.Diagnostics)
+}
+
+// ruleModeConflicts catches what the server refuses or rewrites alongside
+// rule mode, on the planned values: rule mode itself may come from the server
+// (switched on in the UI, with the attribute unset), and so may the trigger's
+// operator and threshold on an update. A rewrite would otherwise fail the
+// apply with "Provider produced inconsistent result".
+func ruleModeConflicts(plan, config *AlertResourceModel, isCreate bool, diags *diag.Diagnostics) {
+	qc := plan.QueryCondition
+	if qc == nil || !knownAndSet(qc.PromQLRuleMode) || !qc.PromQLRuleMode.ValueBool() ||
+		qc.QueryType.ValueString() != "promql" {
 		return
 	}
-	pq := plan.QueryCondition
-	if !knownAndSet(pq.PromQLRuleMode) || !pq.PromQLRuleMode.ValueBool() ||
-		pq.QueryType.ValueString() != "promql" ||
-		!knownAndSet(plan.PendingPeriodSec) || plan.PendingPeriodSec.ValueInt64() == 0 ||
-		pq.PromQLMultiAlert.IsUnknown() || (knownAndSet(pq.PromQLMultiAlert) && pq.PromQLMultiAlert.ValueBool()) {
+	held := config.QueryCondition == nil || config.QueryCondition.PromQLRuleMode.IsNull()
+	why := "With `promql_rule_mode`"
+	if held {
+		why = "This alert has `promql_rule_mode` switched on in OpenObserve (the attribute is unset, so the " +
+			"server's value is kept). With rule mode"
+	}
+	pending := knownAndSet(plan.PendingPeriodSec) && plan.PendingPeriodSec.ValueInt64() > 0
+	if pending && !qc.PromQLMultiAlert.IsUnknown() && !(knownAndSet(qc.PromQLMultiAlert) && qc.PromQLMultiAlert.ValueBool()) {
+		diags.AddAttributeError(path.Root("query_condition").AtName("promql_multi_alert"),
+			"Rule mode with a pending period is a multi-alert",
+			why+" and a `pending_period_sec`, the server turns on `promql_multi_alert` so that each series "+
+				"waits out its own pending period. Set `query_condition.promql_multi_alert = true`.")
+	}
+	if pending && knownAndSet(plan.CreatesIncident) && plan.CreatesIncident.ValueBool() {
+		diags.AddAttributeError(path.Root("creates_incident"), "Rule mode with a pending period cannot open incidents",
+			why+" and a `pending_period_sec` the alert is a per-series multi-alert, and the server refuses "+
+				"`creates_incident = true` on a multi-alert.")
+	}
+	// Every returned series is firing, so the threshold lives in the
+	// expression and the server refuses anything else that would compare.
+	conflicts := []struct {
+		set  bool
+		path path.Path
+		name string
+	}{
+		{qc.PromQLCondition != nil && !qc.PromQLCondition.Column.IsNull(),
+			path.Root("query_condition").AtName("promql_condition"), "`promql_condition`"},
+		{knownAndSet(qc.PromQLWarningValue), path.Root("query_condition").AtName("promql_warning_value"), "`promql_warning_value`"},
+		{qc.Aggregation != nil && !qc.Aggregation.Function.IsNull(),
+			path.Root("query_condition").AtName("aggregation"), "`aggregation`"},
+		{knownAndSet(qc.MultiTimeRange) && len(qc.MultiTimeRange.Elements()) > 0,
+			path.Root("query_condition").AtName("multi_time_range"), "`multi_time_range`"},
+		{plan.TriggerCondition != nil && knownAndSet(plan.TriggerCondition.WarningThreshold),
+			path.Root("trigger_condition").AtName("warning_threshold"), "`warning_threshold`"},
+	}
+	for _, c := range conflicts {
+		if c.set {
+			diags.AddAttributeError(c.path, "Not accepted in rule mode",
+				fmt.Sprintf("%s every series the expression returns is firing, so the comparison belongs in "+
+					"`promql` itself, for example `rate(errors[5m]) > 0.1`. The server refuses %s alongside it. "+
+					"Remove it, or set `promql_rule_mode = false`.", why, c.name))
+		}
+	}
+
+	tc := plan.TriggerCondition
+	if tc == nil {
 		return
 	}
-	resp.Diagnostics.AddAttributeError(path.Root("query_condition").AtName("promql_multi_alert"),
-		"Rule mode with a pending period is a multi-alert",
-		"This alert has `promql_rule_mode` switched on in OpenObserve, and with a `pending_period_sec` the server "+
-			"turns on `promql_multi_alert` so that each series waits out its own pending period. Set "+
-			"`query_condition.promql_multi_alert = true`, or set `promql_rule_mode = false`.")
+	// On create an unset operator and threshold are planned unknown, and the
+	// provider sends `>=` and `1`. On update they are planned from state, which
+	// is what an update sends for them (see keepServerComputed).
+	op, threshold := tc.Operator, tc.Threshold
+	if isCreate && op.IsUnknown() {
+		op = types.StringValue(">=")
+	}
+	if isCreate && threshold.IsUnknown() {
+		threshold = types.Int64Value(1)
+	}
+	if !knownAndSet(op) || !knownAndSet(threshold) {
+		return
+	}
+	o, n := op.ValueString(), threshold.ValueInt64()
+	if (o == ">=" && n == 1) || (o == ">" && n == 0) {
+		return
+	}
+	detail := fmt.Sprintf("%s the alert fires when any series is returned, and the server accepts only a `>= 1` "+
+		"or `> 0` trigger, but this one is `%s %d`.", why, o, n)
+	if o == "=" && n == 0 {
+		detail = why + " every series the expression returns is firing, and the server rewrites an `= 0` " +
+			"trigger as `>= 1`."
+	}
+	diags.AddAttributeError(path.Root("trigger_condition").AtName("threshold"), "Rule mode fires on any returned series",
+		detail+" Set `operator = \">=\"` and `threshold = 1`.")
 }

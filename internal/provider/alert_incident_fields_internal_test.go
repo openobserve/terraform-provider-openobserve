@@ -342,6 +342,21 @@ func TestAlertValidateConfigIncidentFields(t *testing.T) {
 			clearableTrimmedValidator{}.ValidateString(context.Background(),
 				validator.StringRequest{Path: path.Root("oncall_team"), ConfigValue: m.OncallTeam}, vr)
 			resp.Diagnostics.Append(vr.Diagnostics...)
+			// Value checks run at plan time; plan a create of this config.
+			plan := m
+			if m.TriggerCondition != nil {
+				tc := *m.TriggerCondition
+				if tc.Operator.IsNull() {
+					tc.Operator = types.StringUnknown()
+				}
+				if tc.Threshold.IsNull() {
+					tc.Threshold = types.Int64Unknown()
+				}
+				plan.TriggerCondition = &tc
+			}
+			if !resp.Diagnostics.HasError() {
+				resp.Diagnostics.Append(runAlertModifyPlan(t, &plan, &m, nil).Diagnostics...)
+			}
 			got := ""
 			for _, d := range resp.Diagnostics.Errors() {
 				got += d.Summary() + ": " + d.Detail() + "\n"
@@ -451,12 +466,93 @@ func TestReportSettingsNotKeptSeverity(t *testing.T) {
 	got := want
 	got.SuppressRepeats = types.BoolValue(false)
 	var create, update diag.Diagnostics
-	reportSettingsNotKept(&want, &got, &create, true)
-	reportSettingsNotKept(&want, &got, &update, false)
+	gotCreate, gotUpdate := got, got
+	reportSettingsNotKept(&want, &gotCreate, &create, true)
+	reportSettingsNotKept(&want, &gotUpdate, &update, false)
 	if create.HasError() || create.WarningsCount() != 1 {
 		t.Errorf("create: got %v", create)
 	}
 	if update.ErrorsCount() != 1 {
 		t.Errorf("update: got %v", update)
+	}
+}
+
+// On update the trigger is planned from state and sent as the server holds
+// it, so removing operator and threshold does not make a rule-mode trigger
+// `>= 1`.
+func TestAlertModifyPlanRuleModeTriggerFromState(t *testing.T) {
+	t.Parallel()
+	config := alertModel("d", types.BoolNull())
+	promql(&config)
+	config.TriggerCondition.Operator = types.StringNull()
+	config.TriggerCondition.Threshold = types.Int64Null()
+	plan := config
+	tc := *config.TriggerCondition
+	tc.Operator = types.StringValue(">=")
+	tc.Threshold = types.Int64Value(3)
+	plan.TriggerCondition = &tc
+	if got := errorsText(runAlertModifyPlan(t, &plan, &config, &plan).Diagnostics); !strings.Contains(got, "`>= 3`") {
+		t.Errorf("want an error naming the planned trigger, got %q", got)
+	}
+}
+
+// Rule mode held by the server is checked against the configured fields and
+// the trigger like a configured one.
+func TestAlertModifyPlanServerHeldRuleModeConflicts(t *testing.T) {
+	t.Parallel()
+	config := alertModel("d", types.BoolNull())
+	promql(&config)
+	config.QueryCondition.PromQLRuleMode = types.BoolNull()
+	config.QueryCondition.PromQLCondition = &AlertConditionModel{
+		Column: types.StringValue("value"), Operator: types.StringValue(">="), Value: types.StringValue("0"),
+	}
+	config.TriggerCondition.Operator = types.StringValue("=")
+	config.TriggerCondition.Threshold = types.Int64Value(0)
+	plan := config
+	qc := *config.QueryCondition
+	qc.PromQLRuleMode = types.BoolValue(true)
+	plan.QueryCondition = &qc
+	got := errorsText(runAlertModifyPlan(t, &plan, &config, &plan).Diagnostics)
+	for _, want := range []string{"refuses `promql_condition`", "rewrites an `= 0`", "switched on in OpenObserve"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("want %q in:\n%s", want, got)
+		}
+	}
+	// Rule mode off at the server: nothing to check.
+	qc.PromQLRuleMode = types.BoolValue(false)
+	if got := errorsText(runAlertModifyPlan(t, &plan, &config, &plan).Diagnostics); got != "" {
+		t.Errorf("rule mode off: got %q", got)
+	}
+}
+
+// An existing alert with recovery off at the server refuses recovery
+// destinations at plan time too.
+func TestAlertModifyPlanRecoveryDestinationsWithRecoveryOffAtServer(t *testing.T) {
+	t.Parallel()
+	config := alertModel("d", types.BoolNull())
+	config.RecoveryDestinations = stringSet("d2")
+	plan := config
+	plan.NotifyOnRecovery = types.BoolValue(false)
+	if got := errorsText(runAlertModifyPlan(t, &plan, &config, &plan).Diagnostics); !strings.Contains(got, "needs notify_on_recovery") {
+		t.Errorf("want an error, got %q", got)
+	}
+	plan.NotifyOnRecovery = types.BoolValue(true)
+	if got := errorsText(runAlertModifyPlan(t, &plan, &config, &plan).Diagnostics); got != "" {
+		t.Errorf("recovery on at the server: got %q", got)
+	}
+}
+
+// On create, a dropped setting keeps its planned value in state, so Terraform
+// does not fail the create as an inconsistent result.
+func TestReportSettingsNotKeptKeepsPlannedOnCreate(t *testing.T) {
+	t.Parallel()
+	want := alertModel("d", types.BoolNull())
+	want.RunbookURL = types.StringValue("https://rb.example.com/x")
+	got := want
+	got.RunbookURL = types.StringNull()
+	var diags diag.Diagnostics
+	reportSettingsNotKept(&want, &got, &diags, true)
+	if !got.RunbookURL.Equal(want.RunbookURL) {
+		t.Errorf("state runbook_url: got %v, want the planned value", got.RunbookURL)
 	}
 }
