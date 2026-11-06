@@ -172,7 +172,7 @@ up` rather than at compile time.
 |-----------------------------------|--------------------------------------------------------------------------|
 | `openobserve_organization`        | Organizations (create and rename; OpenObserve has no delete API)         |
 | `openobserve_stream`              | Streams: retention, partitioning, indexing, schema options               |
-| `openobserve_folder`              | Folders for dashboards, alerts, reports, and synthetics                  |
+| `openobserve_folder`              | Folders for dashboards, alerts, reports, synthetics, and downtimes       |
 | `openobserve_dashboard`           | Dashboards from a JSON document, any schema version                      |
 | `openobserve_user`                | Users and their membership of an organization                            |
 | `openobserve_service_account`     | Service accounts with API tokens and rotation                            |
@@ -182,6 +182,8 @@ up` rather than at compile time.
 | `openobserve_alert_destination`   | Webhook, email, and SNS destinations                                     |
 | `openobserve_alert`               | Scheduled and real-time alerts (SQL, PromQL, aggregation, and SLO)      |
 | `openobserve_composite_alert`     | Alerts that combine other alerts through a boolean expression           |
+| `openobserve_anomaly_alert` §     | Alerts on values that leave a band trained from the stream's history    |
+| `openobserve_downtime` §          | Maintenance windows that mute alerts and checks and correct SLOs        |
 | `openobserve_slo`                 | Service level objectives, with error budgets and burn-rate alerting     |
 | `openobserve_function`            | VRL and JavaScript transforms, compiled by the server on save           |
 | `openobserve_pipeline_destination`| External endpoints a pipeline forwards records to                       |
@@ -217,7 +219,12 @@ up` rather than at compile time.
 
 † Requires OpenObserve Enterprise with OpenFGA enabled. Against an open-source
 deployment these return a diagnostic saying so rather than an opaque HTTP 403.
-Everything else, including SLOs, works on both editions.
+Everything else, including SLOs, works on both editions, except the resources
+marked §.
+
+§ Requires OpenObserve Enterprise: v1.1.0 or later for anomaly alerts, v1.2.0-rc1
+or later for downtimes. Against an open-source or older server these return a
+diagnostic saying so.
 
 ‡ Requires the server to run with `ZO_SYNTHETICS_ENABLED=true`. The routes are
 not registered when it is off, so the provider turns the resulting 404 into a
@@ -254,6 +261,8 @@ terraform import openobserve_alert_template.example    default/slack
 terraform import openobserve_alert_destination.example default/pagerduty
 terraform import openobserve_alert.example             default/2fXkZ8QlmNbYcV1pR3sT
 terraform import openobserve_composite_alert.example   default/2fXkZ8QlmNbYcV1pR3sT
+terraform import openobserve_anomaly_alert.example     default/3LhlQwAIzEk7kGxqLOHIBgNiQtx
+terraform import openobserve_downtime.example          default/3LidhdqdOAv068f3A3B8XUOAX9w
 terraform import openobserve_slo.example               default/2fXkZ8QlmNbYcV1pR3sT
 terraform import openobserve_function.example          default/redact_email
 terraform import openobserve_pipeline_destination.example default/warehouse

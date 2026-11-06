@@ -3,12 +3,12 @@
 page_title: "openobserve_folder Resource - openobserve"
 subcategory: ""
 description: |-
-  Manages a folder that groups dashboards, alerts, reports, or synthetics.
+  Manages a folder that groups dashboards, alerts, reports, synthetics, or downtimes.
 ---
 
 # openobserve_folder (Resource)
 
-Manages a folder that groups dashboards, alerts, reports, or synthetics.
+Manages a folder that groups dashboards, alerts, reports, synthetics, or downtimes.
 
 ## Example Usage
 
@@ -35,7 +35,7 @@ resource "openobserve_folder" "platform_alerts" {
 ### Optional
 
 - `description` (String) Free-form folder description.
-- `folder_type` (String) What the folder holds: `dashboards` (default), `alerts`, `reports`, or `synthetics`.
+- `folder_type` (String) What the folder holds: `dashboards` (default), `alerts`, `reports`, `synthetics`, or `downtimes`. Downtime folders need OpenObserve Enterprise v1.2.0-rc1 or later.
 - `org_id` (String) Organization identifier. Defaults to the provider's `org_id`.
 
 ### Read-Only

@@ -121,6 +121,7 @@ func (p *OpenObserveProvider) Resources(_ context.Context) []func() resource.Res
 		NewCompositeAlertResource,
 		NewSloResource,
 		NewAnomalyAlertResource,
+		NewDowntimeResource,
 		NewFunctionResource,
 		NewPipelineDestinationResource,
 		NewPipelineResource,
