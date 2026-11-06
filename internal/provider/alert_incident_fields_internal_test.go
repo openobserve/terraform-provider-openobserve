@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 )
 
 func stringSet(v ...string) types.Set {
@@ -278,6 +279,33 @@ func TestAlertValidateConfigIncidentFields(t *testing.T) {
 			m.TriggerCondition.Threshold = types.Int64Value(0)
 		}, "any returned series"},
 		"rule mode": {func(m *AlertResourceModel) { promql(m) }, ""},
+		"rule mode with only a threshold": {func(m *AlertResourceModel) {
+			promql(m)
+			m.TriggerCondition.Operator = types.StringNull()
+			m.TriggerCondition.Threshold = types.Int64Value(3)
+		}, "accepts only"},
+		"rule mode with only an operator": {func(m *AlertResourceModel) {
+			promql(m)
+			m.TriggerCondition.Operator = types.StringValue(">")
+			m.TriggerCondition.Threshold = types.Int64Null()
+		}, "accepts only"},
+		"rule mode with no trigger values": {func(m *AlertResourceModel) {
+			promql(m)
+			m.TriggerCondition.Operator = types.StringNull()
+			m.TriggerCondition.Threshold = types.Int64Null()
+		}, ""},
+		"rule mode, pending period and incidents": {func(m *AlertResourceModel) {
+			promql(m)
+			m.PendingPeriodSec = types.Int64Value(60)
+			m.QueryCondition.PromQLMultiAlert = types.BoolValue(true)
+			m.CreatesIncident = types.BoolValue(true)
+		}, "cannot open incidents"},
+		"oncall_team with spaces": {func(m *AlertResourceModel) {
+			m.OncallTeam = types.StringValue("  ")
+		}, "Leading or trailing whitespace"},
+		"oncall_team cleared": {func(m *AlertResourceModel) {
+			m.OncallTeam = types.StringValue("")
+		}, ""},
 		"rule mode with > 0": {func(m *AlertResourceModel) {
 			promql(m)
 			m.TriggerCondition.Operator = types.StringValue(">")
@@ -311,6 +339,8 @@ func TestAlertValidateConfigIncidentFields(t *testing.T) {
 			vr := &validator.StringResponse{}
 			runbookURLValidator{}.ValidateString(context.Background(),
 				validator.StringRequest{Path: path.Root("runbook_url"), ConfigValue: m.RunbookURL}, vr)
+			clearableTrimmedValidator{}.ValidateString(context.Background(),
+				validator.StringRequest{Path: path.Root("oncall_team"), ConfigValue: m.OncallTeam}, vr)
 			resp.Diagnostics.Append(vr.Diagnostics...)
 			got := ""
 			for _, d := range resp.Diagnostics.Errors() {
@@ -341,4 +371,92 @@ func mustGetAlert(t *testing.T, r *AlertResource) *AlertAPI {
 		t.Fatalf("get alert: %v, %v", alert, err)
 	}
 	return alert
+}
+
+func runAlertModifyPlan(t *testing.T, plan, config *AlertResourceModel, state *AlertResourceModel) *resource.ModifyPlanResponse {
+	t.Helper()
+	r := &AlertResource{}
+	p, c := tfValue(t, r, *plan), tfValue(t, r, *config)
+	st := tfsdk.State{Schema: p.Schema, Raw: tftypes.NewValue(p.Schema.Type().TerraformType(context.Background()), nil)}
+	if state != nil {
+		st = tfValue(t, r, *state)
+	}
+	req := resource.ModifyPlanRequest{Plan: tfsdk.Plan(p), Config: tfsdk.Config(c), State: st}
+	resp := &resource.ModifyPlanResponse{Plan: tfsdk.Plan(p)}
+	r.ModifyPlan(context.Background(), req, resp)
+	return resp
+}
+
+func errorsText(diags diag.Diagnostics) string {
+	out := ""
+	for _, d := range diags.Errors() {
+		out += d.Summary() + ": " + d.Detail() + "\n"
+	}
+	return out
+}
+
+// A new alert with recovery destinations and no notify_on_recovery is
+// refused at plan: the server default is false. An existing one is not,
+// because an unset notify_on_recovery keeps the server's value.
+func TestAlertModifyPlanRecoveryDestinationsOnCreate(t *testing.T) {
+	t.Parallel()
+	m := alertModel("d", types.BoolNull())
+	m.RecoveryDestinations = stringSet("d2")
+	if got := errorsText(runAlertModifyPlan(t, &m, &m, nil).Diagnostics); !strings.Contains(got, "needs notify_on_recovery") {
+		t.Errorf("create: want an error, got %q", got)
+	}
+	if got := errorsText(runAlertModifyPlan(t, &m, &m, &m).Diagnostics); got != "" {
+		t.Errorf("update: want no error, got %q", got)
+	}
+	on := m
+	on.NotifyOnRecovery = types.BoolValue(true)
+	if got := errorsText(runAlertModifyPlan(t, &on, &on, nil).Diagnostics); got != "" {
+		t.Errorf("create with recovery on: want no error, got %q", got)
+	}
+}
+
+// Rule mode held by the server, with the attribute unset, still needs
+// promql_multi_alert with a pending period.
+func TestAlertModifyPlanServerHeldRuleMode(t *testing.T) {
+	t.Parallel()
+	config := alertModel("d", types.BoolNull())
+	promql(&config)
+	config.QueryCondition.PromQLRuleMode = types.BoolNull()
+	config.PendingPeriodSec = types.Int64Value(60)
+	plan := config
+	qc := *config.QueryCondition
+	qc.PromQLRuleMode = types.BoolValue(true)
+	plan.QueryCondition = &qc
+	if got := errorsText(runAlertModifyPlan(t, &plan, &config, &plan).Diagnostics); !strings.Contains(got, "multi-alert") {
+		t.Errorf("want an error, got %q", got)
+	}
+	qc2 := qc
+	qc2.PromQLMultiAlert = types.BoolValue(true)
+	plan.QueryCondition = &qc2
+	cfg2 := config
+	cq := *config.QueryCondition
+	cq.PromQLMultiAlert = types.BoolValue(true)
+	cfg2.QueryCondition = &cq
+	if got := errorsText(runAlertModifyPlan(t, &plan, &cfg2, &plan).Diagnostics); got != "" {
+		t.Errorf("with promql_multi_alert: want no error, got %q", got)
+	}
+}
+
+// On create a dropped setting is a warning, because an error would taint the
+// new alert; on update it is an error.
+func TestReportSettingsNotKeptSeverity(t *testing.T) {
+	t.Parallel()
+	want := alertModel("d", types.BoolNull())
+	want.SuppressRepeats = types.BoolValue(true)
+	got := want
+	got.SuppressRepeats = types.BoolValue(false)
+	var create, update diag.Diagnostics
+	reportSettingsNotKept(&want, &got, &create, true)
+	reportSettingsNotKept(&want, &got, &update, false)
+	if create.HasError() || create.WarningsCount() != 1 {
+		t.Errorf("create: got %v", create)
+	}
+	if update.ErrorsCount() != 1 {
+		t.Errorf("update: got %v", update)
+	}
 }

@@ -240,7 +240,7 @@ Zero, the default, fires on the first evaluation that breaches. A pending period
 Not accepted on a real-time alert, which has no schedule to wait across.
 - `priority` (Number) Triage priority from 1 (most urgent) to 5. Display metadata only; it does not affect when the alert fires.
 - `query_condition` (Block, Optional) What the alert evaluates. (see [below for nested schema](#nestedblock--query_condition))
-- `recovery_destinations` (Set of String) Destinations the recovery notification goes to, when it should not follow the firing. Empty sends it to the alert's own `destinations`. PagerDuty, Opsgenie and ServiceNow destinations recover by closing the ticket their firing opened, so the server refuses them here: list them in `destinations` instead.
+- `recovery_destinations` (Set of String) Destinations the recovery notification goes to, when it should not follow the firing. Empty sends it to the alert's own `destinations`. A PagerDuty, Opsgenie or ServiceNow destination recovers by closing the ticket its own firing opened, so the server refuses one here unless it is also in `destinations`, where it already receives the recovery.
 
 Needs `notify_on_recovery = true`, and is not accepted on a real-time alert. Leave it unset to keep whatever the server holds across updates, so a value set in the UI or through the API is not reset by an unrelated change. Set it to manage the value, and a change made elsewhere then shows as drift. Removing it from a configuration that set it stops managing it and leaves the server value as it is.
 - `row_template` (String) Template applied to each matched row when rendering `{rows}` in the message.
@@ -283,7 +283,7 @@ Optional:
 - `conditions` (String) Filter conditions for `custom` alerts, as a JSON document. Use `jsonencode()` to build it. Both the flat and the nested (grouped) condition formats are accepted.
 - `multi_time_range` (Block List) Historical windows to compare the current window against. (see [below for nested schema](#nestedblock--query_condition--multi_time_range))
 - `promql` (String) PromQL expression. Required when `type` is `promql`.
-- `promql_condition` (Block, Optional) Comparison applied to the PromQL result. Required when `type` is `promql`. (see [below for nested schema](#nestedblock--query_condition--promql_condition))
+- `promql_condition` (Block, Optional) Comparison applied to the PromQL result. Required when `type` is `promql`, unless `promql_rule_mode` is on, which refuses it. (see [below for nested schema](#nestedblock--query_condition--promql_condition))
 - `promql_multi_alert` (Boolean) Evaluate and notify per returned series rather than collapsing the query to one verdict. The group key is the series' full label set, chosen by the expression's own `by (…)` clause. This is PromQL's counterpart to `aggregation.multi_alert`.
 - `promql_rule_mode` (Boolean) Evaluate `promql` the way a Prometheus alerting rule does: every series the expression returns is firing, so the comparison belongs in the expression itself (`rate(errors[5m]) > 0.1`). Needs `type = "promql"` and `stream_type = "metrics"`, and the server refuses it together with `promql_condition`, `promql_warning_value`, `aggregation`, `multi_time_range`, `trigger_condition.warning_threshold` or a trigger other than `>= 1` (the default) or `> 0`. With a `pending_period_sec`, set `promql_multi_alert = true` too: the server turns it on so that each series waits out its own pending period.
 

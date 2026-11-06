@@ -18,14 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `runbook_url` or `oncall_team` to `""` to clear it. The `openobserve_alert`
   data source reports the same settings, except `promql_rule_mode`.
   Combinations the server refuses are caught at plan time: any recovery
-  setting on a real-time alert, `recovery_destinations` with
-  `notify_on_recovery = false`, `keep_firing_for` outside 0 to 86400, a
-  `runbook_url` that is not an `http(s)://` link, and rule mode on a
-  non-PromQL alert, on a non-metrics stream, or together with a
-  `promql_condition`, warning levels, an aggregation or a custom trigger. A
-  server that silently drops a setting because it is too old for it now
-  fails the apply with a message naming the setting and the server version it
-  needs, instead of "Provider produced inconsistent result after apply".
+  setting on a real-time alert, `recovery_destinations` without
+  `notify_on_recovery` (explicitly `false`, or unset on a new alert),
+  `keep_firing_for` outside 0 to 86400, a `runbook_url` that is not an
+  `http(s)://` link, and rule mode on a non-PromQL alert, on a non-metrics
+  stream, or together with a `promql_condition`, warning levels, an
+  aggregation, a custom trigger, or a pending period without
+  `promql_multi_alert = true` (also when rule mode was switched on in the UI)
+  or with `creates_incident`. A server that silently drops a setting because
+  it is too old for it now gets a message naming the setting and the server
+  version it needs, instead of "Provider produced inconsistent result after
+  apply": a warning when the alert is created, so that it is not tainted and
+  recreated on every apply, and an error on update.
   `suppress_repeats` and `promql_rule_mode` need OpenObserve v1.2.0-rc1 or
   later, the others v1.1.0. `suppress_repeats` only takes effect on
   Enterprise, and `oncall_team` needs Enterprise with on-call.

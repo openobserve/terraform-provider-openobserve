@@ -32,6 +32,7 @@ var (
 	_ resource.ResourceWithConfigure      = &AlertResource{}
 	_ resource.ResourceWithImportState    = &AlertResource{}
 	_ resource.ResourceWithValidateConfig = &AlertResource{}
+	_ resource.ResourceWithModifyPlan     = &AlertResource{}
 )
 
 // thresholdOperators are what `trigger_condition.operator` accepts.
@@ -421,9 +422,9 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				ElementType:   types.StringType,
 				PlanModifiers: []planmodifier.Set{setplanmodifier.UseStateForUnknown()},
 				Description: "Destinations the recovery notification goes to, when it should not follow the firing. " +
-					"Empty sends it to the alert's own `destinations`. PagerDuty, Opsgenie and ServiceNow " +
-					"destinations recover by closing the ticket their firing opened, so the server refuses them " +
-					"here: list them in `destinations` instead.\n\n" +
+					"Empty sends it to the alert's own `destinations`. A PagerDuty, Opsgenie or ServiceNow " +
+					"destination recovers by closing the ticket its own firing opened, so the server refuses one " +
+					"here unless it is also in `destinations`, where it already receives the recovery.\n\n" +
 					"Needs `notify_on_recovery = true`, and is not accepted on a real-time alert. " + keepServerValueDoc,
 			},
 			"keep_firing_for": schema.Int64Attribute{
@@ -449,7 +450,7 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"runbook_url": schema.StringAttribute{
 				Optional:      true,
 				Computed:      true,
-				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				PlanModifiers: []planmodifier.String{keepStateWhenUnset{}},
 				Validators:    []validator.String{runbookURLValidator{}},
 				Description: "Link to the runbook for this alert, copied onto every on-call page it opens. Must be " +
 					"an `http://` or `https://` URL with a host, at most 2048 characters. Set it to `\"\"` to " +
@@ -458,7 +459,8 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"oncall_team": schema.StringAttribute{
 				Optional:      true,
 				Computed:      true,
-				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				PlanModifiers: []planmodifier.String{keepStateWhenUnset{}},
+				Validators:    []validator.String{clearableTrimmedValidator{}},
 				Description: "ID of the on-call team this alert pages, overriding the team the server would find " +
 					"from the alert's dimensions. The server refuses an ID that is not an on-call team of the " +
 					"organization. Set it to `\"\"` to go back to ownership discovery. Needs OpenObserve " +
@@ -563,8 +565,9 @@ func (r *AlertResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				},
 				Blocks: map[string]schema.Block{
 					"promql_condition": schema.SingleNestedBlock{
-						Description: "Comparison applied to the PromQL result. Required when `type` is `promql`.",
-						Attributes:  conditionAttributes(false, false),
+						Description: "Comparison applied to the PromQL result. Required when `type` is `promql`, unless " +
+							"`promql_rule_mode` is on, which refuses it.",
+						Attributes: conditionAttributes(false, false),
 					},
 					"aggregation": schema.SingleNestedBlock{
 						Description: "Aggregation applied before the threshold comparison. Only used when `type` is `custom`.",
@@ -1009,7 +1012,10 @@ func (r *AlertResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-	reportSettingsNotKept(&wanted, &plan, &resp.Diagnostics)
+	// A warning, not an error: an error on create taints the alert, and
+	// every later apply would destroy and recreate it. The next plan shows
+	// the setting as a change, and that update fails with the same message.
+	reportSettingsNotKept(&wanted, &plan, &resp.Diagnostics, true)
 }
 
 func (r *AlertResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -1097,7 +1103,7 @@ func (r *AlertResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	}
 	planned.restore(&config, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-	reportSettingsNotKept(&config, &plan, &resp.Diagnostics)
+	reportSettingsNotKept(&config, &plan, &resp.Diagnostics, false)
 }
 
 // plannedUnsetValues holds the planned values of the Optional+Computed
@@ -2147,11 +2153,25 @@ func validatePromQLRuleMode(config *AlertResourceModel, diags *diag.Diagnostics)
 					"refuses %s alongside it. Remove it, or turn rule mode off.", c.name))
 		}
 	}
+	if knownAndSet(config.PendingPeriodSec) && config.PendingPeriodSec.ValueInt64() > 0 &&
+		knownAndSet(config.CreatesIncident) && config.CreatesIncident.ValueBool() {
+		diags.AddAttributeError(path.Root("creates_incident"), "Rule mode with a pending period cannot open incidents",
+			"With `promql_rule_mode` and a `pending_period_sec` the alert is a per-series multi-alert, and the "+
+				"server refuses `creates_incident = true` on a multi-alert. Remove one of the three.")
+	}
+	// The provider fills in `>=` and `1` for an unset operator and threshold,
+	// so a partly configured trigger is checked with those.
 	tc := config.TriggerCondition
-	if tc == nil || !knownAndSet(tc.Operator) || !knownAndSet(tc.Threshold) {
+	if tc == nil || tc.Operator.IsUnknown() || tc.Threshold.IsUnknown() || (tc.Operator.IsNull() && tc.Threshold.IsNull()) {
 		return
 	}
-	op, threshold := tc.Operator.ValueString(), tc.Threshold.ValueInt64()
+	op, threshold := ">=", int64(1)
+	if !tc.Operator.IsNull() {
+		op = tc.Operator.ValueString()
+	}
+	if !tc.Threshold.IsNull() {
+		threshold = tc.Threshold.ValueInt64()
+	}
 	switch {
 	case (op == ">=" && threshold == 1) || (op == ">" && threshold == 0):
 	case op == "=" && threshold == 0:
@@ -2162,18 +2182,18 @@ func validatePromQLRuleMode(config *AlertResourceModel, diags *diag.Diagnostics)
 	default:
 		diags.AddAttributeError(path.Root("trigger_condition").AtName("threshold"),
 			"Rule mode fires on any returned series",
-			fmt.Sprintf("The trigger is `%s %d`, but in rule mode the alert fires when any series is returned, "+
-				"and the server accepts only `>= 1` or `> 0`. Remove `operator` and `threshold` to get `>= 1`.",
-				op, threshold))
+			fmt.Sprintf("The trigger is `%s %d` (an unset operator is `>=` and an unset threshold `1`), but in "+
+				"rule mode the alert fires when any series is returned, and the server accepts only `>= 1` or "+
+				"`> 0`. Remove `operator` and `threshold` to get `>= 1`.", op, threshold))
 	}
 }
 
-// reportSettingsNotKept fails a write when the server did not keep a setting
-// the configuration sets. A server older than the setting drops a field it
+// reportSettingsNotKept reports a write in which the server did not keep a
+// setting the configuration sets: an error, or a warning when warnOnly. A server older than the setting drops a field it
 // does not know without an error, and Terraform would otherwise report the
 // difference as a provider bug ("inconsistent result after apply"). State
 // already holds what the server kept, so the next plan shows the difference.
-func reportSettingsNotKept(want, got *AlertResourceModel, diags *diag.Diagnostics) {
+func reportSettingsNotKept(want, got *AlertResourceModel, diags *diag.Diagnostics, warnOnly bool) {
 	type setting struct {
 		path    path.Path
 		want    attr.Value
@@ -2198,10 +2218,81 @@ func reportSettingsNotKept(want, got *AlertResourceModel, diags *diag.Diagnostic
 		if w, ok := s.want.(types.String); ok && w.ValueString() == "" && s.got.IsNull() {
 			continue
 		}
-		diags.AddAttributeError(s.path, "The server did not keep this setting",
-			fmt.Sprintf("The alert was saved, but the server reports %s where the configuration sets %s. "+
-				"OpenObserve servers older than the setting ignore it: this one needs OpenObserve %s or "+
-				"newer. Upgrade the server, or remove the attribute from the configuration.",
-				s.got, s.want, s.release))
+		detail := fmt.Sprintf("The alert was saved, but the server reports %s where the configuration sets %s. "+
+			"OpenObserve servers older than the setting ignore it: this one needs OpenObserve %s or "+
+			"newer. Upgrade the server, or remove the attribute from the configuration.",
+			s.got, s.want, s.release)
+		if warnOnly {
+			diags.AddAttributeWarning(s.path, "The server did not keep this setting", detail)
+		} else {
+			diags.AddAttributeError(s.path, "The server did not keep this setting", detail)
+		}
 	}
+}
+
+// clearableTrimmedValidator accepts "" (clear) or a value with no leading or
+// trailing whitespace. The server treats a blank value as none, which the
+// provider would otherwise report as a setting the server did not keep.
+type clearableTrimmedValidator struct{}
+
+func (clearableTrimmedValidator) Description(context.Context) string {
+	return "must be empty, or have no leading or trailing whitespace"
+}
+
+func (v clearableTrimmedValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (clearableTrimmedValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if !knownAndSet(req.ConfigValue) {
+		return
+	}
+	if v := req.ConfigValue.ValueString(); v != strings.TrimSpace(v) {
+		resp.Diagnostics.AddAttributeError(req.Path, "Leading or trailing whitespace",
+			fmt.Sprintf("%q has leading or trailing whitespace. Use \"\" to clear the setting.", v))
+	}
+}
+
+// ModifyPlan catches what depends on the server's current values or on
+// whether the alert is new, which ValidateConfig cannot see.
+func (r *AlertResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+	var plan, config AlertResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// A new alert takes the server default for an unset notify_on_recovery,
+	// which is false, and the server refuses recovery destinations without it.
+	if req.State.Raw.IsNull() && config.NotifyOnRecovery.IsNull() &&
+		knownAndSet(config.RecoveryDestinations) && len(config.RecoveryDestinations.Elements()) > 0 {
+		resp.Diagnostics.AddAttributeError(path.Root("recovery_destinations"),
+			"recovery_destinations needs notify_on_recovery",
+			"A new alert starts with `notify_on_recovery = false`, and the server refuses recovery destinations "+
+				"without it. Set `notify_on_recovery = true`.")
+	}
+
+	// Rule mode held by the server, with the attribute unset: the server turns
+	// on promql_multi_alert when there is a pending period, which an unset
+	// promql_multi_alert cannot plan. ValidateConfig covers a configured
+	// rule mode.
+	if config.QueryCondition == nil || !config.QueryCondition.PromQLRuleMode.IsNull() || plan.QueryCondition == nil {
+		return
+	}
+	pq := plan.QueryCondition
+	if !knownAndSet(pq.PromQLRuleMode) || !pq.PromQLRuleMode.ValueBool() ||
+		pq.QueryType.ValueString() != "promql" ||
+		!knownAndSet(plan.PendingPeriodSec) || plan.PendingPeriodSec.ValueInt64() == 0 ||
+		pq.PromQLMultiAlert.IsUnknown() || (knownAndSet(pq.PromQLMultiAlert) && pq.PromQLMultiAlert.ValueBool()) {
+		return
+	}
+	resp.Diagnostics.AddAttributeError(path.Root("query_condition").AtName("promql_multi_alert"),
+		"Rule mode with a pending period is a multi-alert",
+		"This alert has `promql_rule_mode` switched on in OpenObserve, and with a `pending_period_sec` the server "+
+			"turns on `promql_multi_alert` so that each series waits out its own pending period. Set "+
+			"`query_condition.promql_multi_alert = true`, or set `promql_rule_mode = false`.")
 }
