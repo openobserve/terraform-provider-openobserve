@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -136,7 +135,10 @@ func (r *DowntimeResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			"The server keeps a downtime after it ends, for history, and an ended one-time downtime stays in " +
 			"state with `status = \"ended\"`. A downtime cancelled in the UI also stays, with `status = " +
 			"\"cancelled\"` or `\"ended_early\"`, and is not scheduled again by an update: replace it (for " +
-			"example with `terraform apply -replace`) to schedule it anew.\n\n" +
+			"example with `terraform apply -replace`) to schedule it anew. The server deletes ended and " +
+			"cancelled downtimes after its retention period (`O2_DOWNTIMES_RETENTION_DAYS`, 90 days or more). " +
+			"One that was ended or cancelled when it was last read then stays in state as it was, rather " +
+			"than being created again, so a cancelled window does not come back.\n\n" +
 			"Destroying a downtime that is active or scheduled cancels it first, which the server requires, " +
 			"then deletes it. A downtime that already corrected SLO slices cannot be deleted at all: it is " +
 			"cancelled, removed from state with a warning, and removed by the server's retention once the " +
@@ -167,20 +169,21 @@ func (r *DowntimeResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Default:  stringdefault.StaticString("default"),
 				Description: "Downtime folder that holds the downtime, from an `openobserve_folder` with " +
 					"`folder_type = \"downtimes\"`. Defaults to `default`. Changing it moves the downtime in place.",
+				Validators: []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"name": schema.StringAttribute{
 				Required: true,
 				Description: "Name shown in the downtime list and on the banner, at most 256 characters, with no " +
 					"leading or trailing spaces.",
 				Validators: []validator.String{
-					stringvalidator.LengthBetween(1, downtimeMaxNameLen),
+					stringvalidator.UTF8LengthBetween(1, downtimeMaxNameLen),
 					trimmedStringValidator{},
 				},
 			},
 			"reason": schema.StringAttribute{
 				Optional:    true,
 				Description: "Why the downtime exists, at most 1000 characters.",
-				Validators:  []validator.String{stringvalidator.LengthAtMost(downtimeMaxReasonLen)},
+				Validators:  []validator.String{stringvalidator.UTF8LengthAtMost(downtimeMaxReasonLen)},
 			},
 			"condition": schema.StringAttribute{
 				Optional: true,
@@ -189,7 +192,8 @@ func (r *DowntimeResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 					"A pair is `{type = \"pair\", key = \"service\", operator = \"=\", value = \"checkout\"}`, " +
 					"with `operator` `=` or `!=`, and a `value` that may end in `*` to match a prefix. A group " +
 					"is `{type = \"group\", op = \"and\", items = [...]}`, with `op` `and` or `or`.\n\n" +
-					"The server trims keys and lowercases values, so `Checkout` matches `checkout`, and every " +
+					"Keys must be written exactly, with no surrounding spaces. The server lowercases values, so " +
+					"`Checkout` matches `checkout`, and every " +
 					"way to satisfy the condition must include an `=` pair: `!=` alone cannot silence " +
 					"everything. Keys are the semantic dimensions of the organization (such as `service` or " +
 					"`env`); the server refuses a key it does not know.",
@@ -391,16 +395,30 @@ func validateDowntimeConfig(ctx context.Context, config *DowntimeResourceModel, 
 			diags.AddAttributeError(root.AtName("events"), "Missing events",
 				"`events` is required in a `notifications` block: name at least one event to announce.")
 		}
-		if knownAndSet(n.Events) && knownAndSet(n.EndingSoonLeadSecs) && setHasString(n.Events, "ending_soon") {
-			lead := n.EndingSoonLeadSecs.ValueInt64()
+		// The default lead is not applied yet when the configuration is checked.
+		lead, leadKnown := int64(downtimeDefaultLeadSecs), !n.EndingSoonLeadSecs.IsUnknown()
+		if knownAndSet(n.EndingSoonLeadSecs) {
+			lead = n.EndingSoonLeadSecs.ValueInt64()
+		}
+		// A recurring full-day window is an hour short on a spring-forward day.
+		maxLead := window
+		fullDay := false
+		if s.Repeat.ValueString() != "none" && !s.Repeat.IsNull() && window == 24*3600 {
+			maxLead, fullDay = window-3600, true
+		}
+		if knownAndSet(n.Events) && leadKnown && setHasString(n.Events, "ending_soon") {
 			switch {
 			case lead < downtimeMinEndingSoonSec:
 				diags.AddAttributeError(root.AtName("ending_soon_lead_secs"), "Reminder too early",
 					"`ending_soon_lead_secs` must be at least 60 with the `ending_soon` event.")
-			case windowKnown && lead > window:
+			case windowKnown && lead > maxLead:
+				extra := ""
+				if fullDay {
+					extra = " A full-day recurring window counts as an hour shorter, for the day the clocks go forward."
+				}
 				diags.AddAttributeError(root.AtName("ending_soon_lead_secs"), "Reminder longer than the window",
-					fmt.Sprintf("`ending_soon_lead_secs` is %d, but the window lasts %d seconds, so the reminder "+
-						"would come before it starts.", lead, window))
+					fmt.Sprintf("`ending_soon_lead_secs` is %d (600 when unset), but it can be at most %d seconds "+
+						"for this window.%s", lead, maxLead, extra))
 			}
 		}
 	}
@@ -630,6 +648,12 @@ func (r *DowntimeResource) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 	if d == nil {
+		// The server's retention deletes ended and cancelled downtimes. Removing
+		// one from state would make the next apply create it again, bringing a
+		// cancelled window back, so it stays as last read.
+		if downtimeFinished(state.Status.ValueString()) {
+			return
+		}
 		resp.State.RemoveResource(ctx)
 		return
 	}
@@ -663,9 +687,14 @@ func (r *DowntimeResource) Update(ctx context.Context, req resource.UpdateReques
 		return
 	}
 	if current == nil {
-		resp.Diagnostics.AddError("Downtime not found",
-			fmt.Sprintf("Downtime %q was deleted from org %q outside Terraform. Run `terraform apply` again to "+
-				"create it anew.", id, org))
+		detail := fmt.Sprintf("Downtime %q was deleted from org %q outside Terraform. Run `terraform apply` "+
+			"again to create it anew.", id, org)
+		if downtimeFinished(state.Status.ValueString()) {
+			detail = fmt.Sprintf("Downtime %q had %s, and the server's retention has since deleted it, so it "+
+				"cannot be changed. Replace it to schedule it again, for example with "+
+				"`terraform apply -replace=<address>`.", id, state.Status.ValueString())
+		}
+		resp.Diagnostics.AddError("Downtime not found", detail)
 		return
 	}
 	version := current.Version
@@ -721,7 +750,9 @@ func (r *DowntimeResource) Delete(ctx context.Context, req resource.DeleteReques
 	}
 	// The server refuses to delete a downtime that is active or scheduled.
 	if current.Status == "active" || current.Status == "scheduled" {
-		if err := r.client.CancelDowntime(ctx, org, id); err != nil {
+		// A window that ended since the read cannot be cancelled any more, and
+		// no longer needs to be.
+		if err := r.client.CancelDowntime(ctx, org, id); err != nil && !isDowntimeAlreadyEnded(err) {
 			summary, detail := downtimeErrorDiag("cancelling", err)
 			resp.Diagnostics.AddError(summary, detail)
 			return
@@ -1067,6 +1098,10 @@ func checkDowntimeCondition(c *downtimeCondition, at string) error {
 		if strings.TrimSpace(c.Key) == "" {
 			return fmt.Errorf("%s is a pair with no `key`", at)
 		}
+		if c.Key != strings.TrimSpace(c.Key) {
+			return fmt.Errorf("%s has key %q with surrounding spaces; the server refuses a key that is not "+
+				"exactly a dimension of the organization", at, c.Key)
+		}
 		if c.Operator != "=" && c.Operator != "!=" {
 			return fmt.Errorf("%s has operator %q; it must be `=` or `!=`", at, c.Operator)
 		}
@@ -1131,7 +1166,7 @@ func downtimeConditionToModel(prior types.String, raw json.RawMessage, diags *di
 	}
 	if knownAndSet(prior) {
 		if mine, err := parseDowntimeCondition(prior.ValueString()); err == nil &&
-			reflect.DeepEqual(normalizedDowntimeCondition(*mine), normalizedDowntimeCondition(server)) {
+			sameDowntimeCondition(normalizedDowntimeCondition(*mine), normalizedDowntimeCondition(server)) {
 			return prior
 		}
 	}
@@ -1210,4 +1245,42 @@ func (lowercaseTrimmedValidator) ValidateString(_ context.Context, req validator
 			fmt.Sprintf("%q: the server stores tags trimmed and lowercased, so write it as %q.",
 				s, strings.ToLower(strings.TrimSpace(s))))
 	}
+}
+
+// sameDowntimeCondition compares two normalized conditions. Values are
+// compared case-insensitively too: the server lowercases with Rust's
+// to_lowercase, which differs from Go's for a few characters (a final sigma,
+// a dotted capital I), and a value the server lowercased its way is still the
+// value the configuration wrote.
+func sameDowntimeCondition(a, b downtimeCondition) bool {
+	if a.Type != b.Type || a.Op != b.Op || a.Key != b.Key || a.Operator != b.Operator ||
+		len(a.Items) != len(b.Items) || (a.Value == nil) != (b.Value == nil) {
+		return false
+	}
+	if a.Value != nil && *a.Value != *b.Value {
+		strip := func(s string) string { return strings.ReplaceAll(s, "\u0307", "") }
+		if !strings.EqualFold(strip(*a.Value), strip(*b.Value)) {
+			return false
+		}
+	}
+	for i := range a.Items {
+		if !sameDowntimeCondition(a.Items[i], b.Items[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// downtimeFinished reports whether a status is one the server's retention
+// eventually deletes.
+func downtimeFinished(status string) bool {
+	return status == "ended" || status == "cancelled" || status == "ended_early"
+}
+
+// isDowntimeAlreadyEnded reports the 409 a cancel gets for a window that has
+// already ended.
+func isDowntimeAlreadyEnded(err error) bool {
+	var apiErr *apiError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict &&
+		strings.Contains(apiErr.Body, "already ended")
 }

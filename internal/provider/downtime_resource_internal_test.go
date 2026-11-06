@@ -36,6 +36,11 @@ type fakeDowntimes struct {
 	edition string
 	// sloCorrected makes a delete answer 409 as for a row that corrected SLOs.
 	sloCorrected bool
+	// endBeforeCancel makes a cancel answer 409 "already ended", as when the
+	// window ends between the provider's read and its cancel.
+	endBeforeCancel bool
+	// statusOverride is the status a GET reports, by id, instead of the real one.
+	statusOverride map[string]string
 }
 
 func newFakeDowntimes(t *testing.T) (*fakeDowntimes, *Client) {
@@ -132,6 +137,10 @@ func (f *fakeDowntimes) serve(w http.ResponseWriter, r *http.Request) {
 			notFound()
 			return
 		}
+		if f.status(row) == "ended" || f.endBeforeCancel {
+			http.Error(w, `{"code":409,"message":"Downtime already ended"}`, http.StatusConflict)
+			return
+		}
 		row["cancelled_at"] = float64(time.Now().UnixMicro())
 		row["version"] = row["version"].(float64) + 1
 		_ = json.NewEncoder(w).Encode(row)
@@ -149,6 +158,9 @@ func (f *fakeDowntimes) serve(w http.ResponseWriter, r *http.Request) {
 				out[k] = v
 			}
 			out["status"] = f.status(row)
+			if st, ok := f.statusOverride[id]; ok {
+				out["status"] = st
+			}
 			out["affected"] = map[string]any{"alerts": []any{}}
 			_ = json.NewEncoder(w).Encode(out)
 		case http.MethodPut:
@@ -220,7 +232,7 @@ func oneTimeDowntime(start, end string) DowntimeResourceModel {
 		Name:       types.StringValue("tf_window"),
 		Reason:     types.StringNull(),
 		Condition: types.StringValue(`{"type":"group","op":"and","items":[` +
-			`{"type":"pair","key":" service ","operator":"=","value":" Checkout "}]}`),
+			`{"type":"pair","key":"service","operator":"=","value":" Checkout "}]}`),
 		ShowBanner: types.BoolValue(false),
 		Status:     types.StringUnknown(),
 		Targets:    types.ListValueMust(downtimeTargetObjType, []attr.Value{downtimeTarget("alerts", "a1")}),
@@ -532,6 +544,32 @@ func TestDowntimeValidateConfig(t *testing.T) {
 		"unknown condition field": {func(m *DowntimeResourceModel) {
 			m.Condition = types.StringValue(`{"type":"pair","key":"service","operator":"=","value":"x","oops":1}`)
 		}, "not a valid condition"},
+		"key with spaces": {func(m *DowntimeResourceModel) {
+			m.Condition = types.StringValue(`{"type":"pair","key":" service ","operator":"=","value":"x"}`)
+		}, "surrounding spaces"},
+		"default reminder longer than the window": {func(m *DowntimeResourceModel) {
+			m.Schedule.EndsAt = types.StringValue("2027-01-10T00:05:00Z")
+			m.Notifications = &DowntimeNotificationsModel{
+				Destinations: stringSetOf("d1"), Events: stringSetOf("ending_soon"),
+				EndingSoonLeadSecs: types.Int64Null(),
+			}
+		}, "600 when unset"},
+		"full-day recurring reminder": {func(m *DowntimeResourceModel) {
+			recurring(m, "daily")
+			m.Schedule.DurationSecs = types.Int64Value(86400)
+			m.Notifications = &DowntimeNotificationsModel{
+				Destinations: stringSetOf("d1"), Events: stringSetOf("ending_soon"),
+				EndingSoonLeadSecs: types.Int64Value(86000),
+			}
+		}, "an hour shorter"},
+		"full-day recurring reminder that fits": {func(m *DowntimeResourceModel) {
+			recurring(m, "daily")
+			m.Schedule.DurationSecs = types.Int64Value(86400)
+			m.Notifications = &DowntimeNotificationsModel{
+				Destinations: stringSetOf("d1"), Events: stringSetOf("ending_soon"),
+				EndingSoonLeadSecs: types.Int64Value(82800),
+			}
+		}, ""},
 		"notifications without events": {func(m *DowntimeResourceModel) {
 			m.Notifications = &DowntimeNotificationsModel{
 				Destinations: stringSetOf("d1"), Events: types.SetNull(types.StringType),
@@ -577,7 +615,7 @@ func TestDowntimeConditionToModel(t *testing.T) {
 	t.Parallel()
 	server := json.RawMessage(`{"type":"pair","key":"env","operator":"=","value":"prod"}`)
 	var d diag.Diagnostics
-	same := types.StringValue(`{ "type": "pair", "key": "env ", "operator": "=", "value": "PROD" }`)
+	same := types.StringValue(`{ "type": "pair", "key": "env", "operator": "=", "value": " PROD " }`)
 	if got := downtimeConditionToModel(same, server, &d); !got.Equal(same) {
 		t.Errorf("same after normalization: got %v", got)
 	}
@@ -623,5 +661,77 @@ func TestWeeklyGapSecs(t *testing.T) {
 		if got := weeklyGapSecs(tc.days); got != tc.want {
 			t.Errorf("%v: got %d, want %d", tc.days, got, tc.want)
 		}
+	}
+}
+
+// A finished downtime the server's retention deleted stays in state, so it is
+// not created again; an unfinished one that vanished is removed.
+func TestDowntimeReadKeepsSweptFinishedDowntime(t *testing.T) {
+	t.Parallel()
+	for status, keep := range map[string]bool{"ended": true, "cancelled": true, "ended_early": true, "scheduled": false} {
+		fake, client := newFakeDowntimes(t)
+		r := &DowntimeResource{client: client}
+		plan := oneTimeDowntime(future(time.Hour), future(2*time.Hour))
+		plan.Schedule.DurationSecs = types.Int64Value(3600)
+		state, diags := createDowntime(t, r, plan)
+		if diags.HasError() {
+			t.Fatalf("create: %v", diags)
+		}
+		state.Status = types.StringValue(status)
+		delete(fake.rows, "dt1")
+		st := tfValue(t, r, state)
+		resp := &resource.ReadResponse{State: st}
+		r.Read(context.Background(), resource.ReadRequest{State: st}, resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("%s: read: %v", status, resp.Diagnostics)
+		}
+		if kept := !resp.State.Raw.IsNull(); kept != keep {
+			t.Errorf("%s: kept in state %v, want %v", status, kept, keep)
+		}
+	}
+}
+
+// A window that ends between the read and the cancel is deleted anyway.
+func TestDowntimeDeleteWhenWindowEndsBeforeCancel(t *testing.T) {
+	t.Parallel()
+	fake, client := newFakeDowntimes(t)
+	r := &DowntimeResource{client: client}
+	plan := oneTimeDowntime(future(-time.Minute), future(time.Hour))
+	plan.Schedule.DurationSecs = types.Int64Value(3660)
+	state, diags := createDowntime(t, r, plan)
+	if diags.HasError() {
+		t.Fatalf("create: %v", diags)
+	}
+	// The read still says active; by the cancel, the window has ended.
+	fake.statusOverride = map[string]string{"dt1": "active"}
+	fake.endBeforeCancel = true
+	fake.rows["dt1"]["schedule"].(map[string]any)["ends_at"] = float64(time.Now().Add(-time.Second).UnixMicro())
+	st := tfValue(t, r, state)
+	resp := &resource.DeleteResponse{State: st}
+	r.Delete(context.Background(), resource.DeleteRequest{State: st}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("delete: %v", resp.Diagnostics)
+	}
+	if _, present := fake.rows["dt1"]; present {
+		t.Error("row still present")
+	}
+}
+
+func TestSameDowntimeConditionUnicode(t *testing.T) {
+	t.Parallel()
+	pair := func(v string) downtimeCondition {
+		return downtimeCondition{Type: "pair", Key: "city", Operator: "=", Value: &v}
+	}
+	for _, tc := range []struct{ configured, server string }{
+		{"ΟΔΟΣ", "οδος"},
+		{"İSTANBUL", "i\u0307stanbul"},
+		{"Checkout", "checkout"},
+	} {
+		if !sameDowntimeCondition(normalizedDowntimeCondition(pair(tc.configured)), pair(tc.server)) {
+			t.Errorf("%q vs server %q: want equal", tc.configured, tc.server)
+		}
+	}
+	if sameDowntimeCondition(pair("prod"), pair("staging")) {
+		t.Error("different values must differ")
 	}
 }

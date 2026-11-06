@@ -6,7 +6,7 @@ description: |-
   Manages an OpenObserve downtime: a maintenance window during which alerts, anomaly detections and synthetics checks are muted, and SLOs are corrected.
   Requires OpenObserve Enterprise v1.2.0-rc1 or later. An open-source or older server is refused with a diagnostic saying so.
   A downtime is one-time (schedule.repeat = "none", from starts_at to ends_at) or recurring (daily or weekly, a window of duration_secs starting at start_time_local in timezone). Each target block picks a module and narrows it by folder, ID or (for synthetics) tag, and condition narrows every module but synthetics by the dimensions of what fires.
-  The server keeps a downtime after it ends, for history, and an ended one-time downtime stays in state with status = "ended". A downtime cancelled in the UI also stays, with status = "cancelled" or "ended_early", and is not scheduled again by an update: replace it (for example with terraform apply -replace) to schedule it anew.
+  The server keeps a downtime after it ends, for history, and an ended one-time downtime stays in state with status = "ended". A downtime cancelled in the UI also stays, with status = "cancelled" or "ended_early", and is not scheduled again by an update: replace it (for example with terraform apply -replace) to schedule it anew. The server deletes ended and cancelled downtimes after its retention period (O2_DOWNTIMES_RETENTION_DAYS, 90 days or more). One that was ended or cancelled when it was last read then stays in state as it was, rather than being created again, so a cancelled window does not come back.
   Destroying a downtime that is active or scheduled cancels it first, which the server requires, then deletes it. A downtime that already corrected SLO slices cannot be deleted at all: it is cancelled, removed from state with a warning, and removed by the server's retention once the SLO window has passed.
 ---
 
@@ -18,7 +18,7 @@ Manages an OpenObserve downtime: a maintenance window during which alerts, anoma
 
 A downtime is one-time (`schedule.repeat = "none"`, from `starts_at` to `ends_at`) or recurring (`daily` or `weekly`, a window of `duration_secs` starting at `start_time_local` in `timezone`). Each `target` block picks a module and narrows it by folder, ID or (for synthetics) tag, and `condition` narrows every module but synthetics by the dimensions of what fires.
 
-The server keeps a downtime after it ends, for history, and an ended one-time downtime stays in state with `status = "ended"`. A downtime cancelled in the UI also stays, with `status = "cancelled"` or `"ended_early"`, and is not scheduled again by an update: replace it (for example with `terraform apply -replace`) to schedule it anew.
+The server keeps a downtime after it ends, for history, and an ended one-time downtime stays in state with `status = "ended"`. A downtime cancelled in the UI also stays, with `status = "cancelled"` or `"ended_early"`, and is not scheduled again by an update: replace it (for example with `terraform apply -replace`) to schedule it anew. The server deletes ended and cancelled downtimes after its retention period (`O2_DOWNTIMES_RETENTION_DAYS`, 90 days or more). One that was ended or cancelled when it was last read then stays in state as it was, rather than being created again, so a cancelled window does not come back.
 
 Destroying a downtime that is active or scheduled cancels it first, which the server requires, then deletes it. A downtime that already corrected SLO slices cannot be deleted at all: it is cancelled, removed from state with a warning, and removed by the server's retention once the SLO window has passed.
 
@@ -99,7 +99,7 @@ resource "openobserve_downtime" "weekend_batch" {
 
 - `condition` (String) Dimension condition, as a JSON document; build it with `jsonencode()`. It narrows every target whose module has dimensions (all but synthetics) to the items it matches. A pair is `{type = "pair", key = "service", operator = "=", value = "checkout"}`, with `operator` `=` or `!=`, and a `value` that may end in `*` to match a prefix. A group is `{type = "group", op = "and", items = [...]}`, with `op` `and` or `or`.
 
-The server trims keys and lowercases values, so `Checkout` matches `checkout`, and every way to satisfy the condition must include an `=` pair: `!=` alone cannot silence everything. Keys are the semantic dimensions of the organization (such as `service` or `env`); the server refuses a key it does not know.
+Keys must be written exactly, with no surrounding spaces. The server lowercases values, so `Checkout` matches `checkout`, and every way to satisfy the condition must include an `=` pair: `!=` alone cannot silence everything. Keys are the semantic dimensions of the organization (such as `service` or `env`); the server refuses a key it does not know.
 - `folder_id` (String) Downtime folder that holds the downtime, from an `openobserve_folder` with `folder_type = "downtimes"`. Defaults to `default`. Changing it moves the downtime in place.
 - `notifications` (Block, Optional) Announce the downtime's events to alert destinations. Omit it to announce nothing. (see [below for nested schema](#nestedblock--notifications))
 - `org_id` (String) Organization identifier. Defaults to the provider's `org_id`.
