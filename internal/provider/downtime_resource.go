@@ -138,11 +138,13 @@ func (r *DowntimeResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			"example with `terraform apply -replace`) to schedule it anew. The server deletes ended and " +
 			"cancelled downtimes after its retention period (`O2_DOWNTIMES_RETENTION_DAYS`, 90 days or more). " +
 			"One that was ended or cancelled when it was last read then stays in state as it was, rather " +
-			"than being created again, so a cancelled window does not come back.\n\n" +
+			"than being created again, so a cancelled window does not come back. That also holds for a finished " +
+			"downtime deleted by hand; replace it to create it again.\n\n" +
 			"Destroying a downtime that is active or scheduled cancels it first, which the server requires, " +
 			"then deletes it. A downtime that already corrected SLO slices cannot be deleted at all: it is " +
-			"cancelled, removed from state with a warning, and removed by the server's retention once the " +
-			"SLO window has passed.",
+			"cancelled if still active or scheduled, moved to the `default` folder so its own folder can be " +
+			"deleted, removed from state with a warning, and removed by the server's retention once the SLO " +
+			"window has passed.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -474,7 +476,8 @@ func validateDowntimeSchedule(s *DowntimeScheduleModel, diags *diag.Diagnostics)
 	}
 	start, startOK := parseRFC3339(s.StartsAt)
 	end, endOK := parseRFC3339(s.EndsAt)
-	if startOK && endOK && !end.After(start) {
+	// The server keeps microseconds, so compare at that precision.
+	if startOK && endOK && end.UnixMicro() <= start.UnixMicro() {
 		diags.AddAttributeError(root.AtName("ends_at"), "End before start", "`ends_at` must be after `starts_at`.")
 		return 0, false
 	}
@@ -500,7 +503,7 @@ func validateDowntimeSchedule(s *DowntimeScheduleModel, diags *diag.Diagnostics)
 		if !startOK || !endOK {
 			return 0, false
 		}
-		span := int64(end.Sub(start) / time.Second)
+		span := (end.UnixMicro() - start.UnixMicro()) / 1_000_000
 		if span < downtimeMinDurationSecs || span > downtimeMaxDurationSecs {
 			diags.AddAttributeError(root.AtName("ends_at"), "Window out of range",
 				fmt.Sprintf("The window lasts %d seconds. It must be between 1 minute and 7 days.", span))
@@ -596,7 +599,7 @@ func (r *DowntimeResource) ModifyPlan(ctx context.Context, req resource.ModifyPl
 		return
 	}
 	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("schedule").AtName("duration_secs"),
-		types.Int64Value(int64(end.Sub(start)/time.Second)))...)
+		types.Int64Value((end.UnixMicro()-start.UnixMicro())/1_000_000))...)
 }
 
 // ---------------------------------------------------------------------------
@@ -777,9 +780,22 @@ func (r *DowntimeResource) Delete(ctx context.Context, req resource.DeleteReques
 		var apiErr *apiError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict &&
 			strings.Contains(apiErr.Body, "corrected SLO slices") {
-			resp.Diagnostics.AddWarning("Downtime cancelled but kept by the server",
-				fmt.Sprintf("Downtime %q corrected SLO slices, so the server keeps it until the SLO window has "+
-					"passed and its retention removes it. It is cancelled and no longer managed by Terraform.", id))
+			// The kept row would block deleting its folder until the sweep, so it
+			// is moved to the default folder, which is never deleted.
+			moved := ""
+			if current.FolderID != "" && current.FolderID != "default" {
+				if err := r.client.MoveDowntime(ctx, org, id, "default"); err != nil {
+					moved = fmt.Sprintf(" Moving it out of folder %q failed, so that folder cannot be deleted "+
+						"until then: %s", current.FolderID, err.Error())
+				} else {
+					moved = fmt.Sprintf(" It was moved from folder %q to `default`, so that folder can be deleted.",
+						current.FolderID)
+				}
+			}
+			resp.Diagnostics.AddWarning("Downtime kept by the server",
+				fmt.Sprintf("Downtime %q corrected SLO slices, so the server keeps it, inactive, until the SLO "+
+					"window has passed and its retention removes it. It is no longer managed by Terraform.%s",
+					id, moved))
 			return
 		}
 		summary, detail := downtimeErrorDiag("deleting", err)

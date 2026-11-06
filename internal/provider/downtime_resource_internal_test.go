@@ -762,3 +762,46 @@ func TestDowntimeCreateKeepsStateWhenReadFails(t *testing.T) {
 		t.Errorf("state: got id %v / %v, want the created downtime", got.ID, got.DowntimeID)
 	}
 }
+
+// A downtime the server keeps because it corrected SLOs is moved to the
+// default folder, so its own folder can be deleted.
+func TestDowntimeDeleteSloCorrectedMovesToDefault(t *testing.T) {
+	t.Parallel()
+	fake, client := newFakeDowntimes(t)
+	fake.sloCorrected = true
+	r := &DowntimeResource{client: client}
+	plan := oneTimeDowntime(future(-2*time.Hour), future(-time.Hour))
+	plan.FolderID = types.StringValue("maint")
+	plan.Schedule.DurationSecs = types.Int64Value(3600)
+	state, diags := createDowntime(t, r, plan)
+	if diags.HasError() {
+		t.Fatalf("create: %v", diags)
+	}
+	st := tfValue(t, r, state)
+	resp := &resource.DeleteResponse{State: st}
+	r.Delete(context.Background(), resource.DeleteRequest{State: st}, resp)
+	if resp.Diagnostics.HasError() || resp.Diagnostics.WarningsCount() != 1 {
+		t.Fatalf("delete: %v", resp.Diagnostics)
+	}
+	if got := fake.rows["dt1"]["folder_id"]; got != "default" {
+		t.Errorf("folder after delete: got %v, want default", got)
+	}
+}
+
+// The span is computed at the server's microsecond precision.
+func TestDowntimeSpanAtMicroseconds(t *testing.T) {
+	t.Parallel()
+	m := oneTimeDowntime("2026-12-01T22:00:00.0000005Z", "2026-12-01T22:02:00Z")
+	m.Schedule.DurationSecs = types.Int64Null()
+	var diags diag.Diagnostics
+	if span, ok := validateDowntimeSchedule(m.Schedule, &diags); !ok || span != 120 || diags.HasError() {
+		t.Errorf("span: got %d %v %v, want 120", span, ok, diags)
+	}
+	tiny := oneTimeDowntime("2026-12-01T22:00:00.0000001Z", "2026-12-01T22:00:00.0000009Z")
+	tiny.Schedule.DurationSecs = types.Int64Null()
+	diags = nil
+	validateDowntimeSchedule(tiny.Schedule, &diags)
+	if !diags.HasError() {
+		t.Error("an end within the same microsecond must be refused")
+	}
+}
