@@ -412,6 +412,12 @@ type AlertDataSourceModel struct {
 	Owner            types.String `tfsdk:"owner"`
 	Destinations     types.Set    `tfsdk:"destinations"`
 	Tags             types.Set    `tfsdk:"tags"`
+
+	RecoveryDestinations types.Set    `tfsdk:"recovery_destinations"`
+	KeepFiringFor        types.Int64  `tfsdk:"keep_firing_for"`
+	SuppressRepeats      types.Bool   `tfsdk:"suppress_repeats"`
+	RunbookURL           types.String `tfsdk:"runbook_url"`
+	OncallTeam           types.String `tfsdk:"oncall_team"`
 }
 
 func (d *AlertDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
@@ -458,6 +464,27 @@ func (d *AlertDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, 
 				Computed:    true,
 				ElementType: types.StringType,
 				Description: "Selection tags on the alert.",
+			},
+			"recovery_destinations": schema.SetAttribute{
+				Computed:    true,
+				ElementType: types.StringType,
+				Description: "Destinations the recovery notification goes to. Empty means the alert's own destinations.",
+			},
+			"keep_firing_for": schema.Int64Attribute{
+				Computed:    true,
+				Description: "Seconds the condition must stay clear before the alert recovers.",
+			},
+			"suppress_repeats": schema.BoolAttribute{
+				Computed:    true,
+				Description: "Whether the alert notifies once per state change instead of on every firing evaluation.",
+			},
+			"runbook_url": schema.StringAttribute{
+				Computed:    true,
+				Description: "Link to the runbook for this alert. Null when none is set.",
+			},
+			"oncall_team": schema.StringAttribute{
+				Computed:    true,
+				Description: "ID of the on-call team the alert pages. Null when the team comes from ownership discovery.",
 			},
 		},
 	}
@@ -526,6 +553,11 @@ func (d *AlertDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 	data.Owner = stringFromPtr(alert.Owner)
 	data.Destinations = setFromStrings(ctx, alert.Destinations, &resp.Diagnostics)
 	data.Tags = setFromStrings(ctx, alert.Tags, &resp.Diagnostics)
+	data.RecoveryDestinations = setFromStrings(ctx, alert.RecoveryDestinations, &resp.Diagnostics)
+	data.KeepFiringFor = types.Int64Value(alert.KeepFiringFor)
+	data.SuppressRepeats = types.BoolValue(alert.SuppressRepeats)
+	data.RunbookURL = clearedStringToModel(types.StringNull(), alert.RunbookURL)
+	data.OncallTeam = clearedStringToModel(types.StringNull(), alert.OncallTeam)
 
 	if folderID == "" && alert.FolderID != nil {
 		folderID = *alert.FolderID

@@ -39,8 +39,13 @@ output "alert_destinations" {
 - `enabled` (Boolean) Whether the alert is evaluated.
 - `id` (String) Data source ID in the format `{org_id}/{alert_id}`.
 - `is_real_time` (Boolean) Whether the alert evaluates as data arrives.
+- `keep_firing_for` (Number) Seconds the condition must stay clear before the alert recovers.
 - `notify_on_recovery` (Boolean) Whether a notification is sent when the firing alert recovers.
+- `oncall_team` (String) ID of the on-call team the alert pages. Null when the team comes from ownership discovery.
 - `owner` (String) Alert owner.
+- `recovery_destinations` (Set of String) Destinations the recovery notification goes to. Empty means the alert's own destinations.
+- `runbook_url` (String) Link to the runbook for this alert. Null when none is set.
 - `stream_name` (String) Stream the alert queries.
 - `stream_type` (String) Stream type the alert queries.
+- `suppress_repeats` (Boolean) Whether the alert notifies once per state change instead of on every firing evaluation.
 - `tags` (Set of String) Selection tags on the alert.

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Recovery and on-call settings on `openobserve_alert`**:
+  `recovery_destinations`, `keep_firing_for`, `suppress_repeats`,
+  `runbook_url`, `oncall_team` and `query_condition.promql_rule_mode`. Until
+  now the provider only preserved these across updates; now they can be set.
+  Like `notify_on_recovery`, each one keeps the server's value while it is
+  unset, so a value set in the UI is not reset by an unrelated change. Set
+  `runbook_url` or `oncall_team` to `""` to clear it. The `openobserve_alert`
+  data source reports the same settings, except `promql_rule_mode`.
+  Combinations the server refuses are caught at plan time: any recovery
+  setting on a real-time alert, `recovery_destinations` with
+  `notify_on_recovery = false`, `keep_firing_for` outside 0 to 86400, a
+  `runbook_url` that is not an `http(s)://` link, and rule mode on a
+  non-PromQL alert, on a non-metrics stream, or together with a
+  `promql_condition`, warning levels, an aggregation or a custom trigger. A
+  server that silently drops a setting because it is too old for it now
+  fails the apply with a message naming the setting and the server version it
+  needs, instead of "Provider produced inconsistent result after apply".
+  `suppress_repeats` and `promql_rule_mode` need OpenObserve v1.2.0-rc1 or
+  later, the others v1.1.0. `suppress_repeats` only takes effect on
+  Enterprise, and `oncall_team` needs Enterprise with on-call.
+
 ## [1.5.0] - 2026-11-05
 
 ### Added
