@@ -215,8 +215,8 @@ func (r *UserResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	}
 
 	state.OrgID = types.StringValue(org)
-	state.ID = types.StringValue(userResourceID(org, user.Email))
 	r.applyUserToModel(user, &state)
+	state.ID = types.StringValue(userResourceID(org, state.Email.ValueString()))
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -309,7 +309,7 @@ func (r *UserResource) ImportState(ctx context.Context, req resource.ImportState
 	state := UserResourceModel{
 		ID:          types.StringValue(req.ID),
 		OrgID:       types.StringValue(parts[0]),
-		Email:       types.StringValue(user.Email),
+		Email:       keepEmailSpelling(types.StringValue(parts[1]), user.Email),
 		CustomRoles: types.SetNull(types.StringType),
 		Password:    types.StringNull(),
 	}
@@ -331,7 +331,7 @@ func (r *UserResource) readInto(ctx context.Context, org, email string, model *U
 }
 
 func (r *UserResource) applyUserToModel(user *UserAPI, model *UserResourceModel) {
-	model.Email = types.StringValue(user.Email)
+	model.Email = keepEmailSpelling(model.Email, user.Email)
 	model.FirstName = types.StringValue(user.FirstName)
 	model.LastName = types.StringValue(user.LastName)
 	model.IsExternal = types.BoolValue(user.IsExternal)
@@ -341,6 +341,20 @@ func (r *UserResource) applyUserToModel(user *UserAPI, model *UserResourceModel)
 	if user.Role != "" {
 		model.Role = types.StringValue(user.Role)
 	}
+}
+
+// keepEmailSpelling returns the email to store for an account the server
+// reported as stored. OpenObserve lowercases emails when it creates an account,
+// so a configured `Jane@Example.com` comes back as `jane@example.com`. Emails
+// are matched case-insensitively everywhere else in this provider, so the
+// configured spelling is kept when the two differ only by case; storing the
+// server's spelling would fail the apply with "inconsistent result after apply"
+// and plan a replacement on every run.
+func keepEmailSpelling(current types.String, stored string) types.String {
+	if !current.IsNull() && !current.IsUnknown() && equalFold(current.ValueString(), stored) {
+		return current
+	}
+	return types.StringValue(stored)
 }
 
 func userResourceID(orgID, email string) string {

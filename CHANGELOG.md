@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`openobserve_user` and `openobserve_service_account` keep the configured
+  `email` spelling.** OpenObserve lowercases an email when it creates the
+  account, and the provider stored the server's spelling, so an `email` with
+  capitals failed the first apply with "Provider produced inconsistent result
+  after apply" and planned a replacement on every run after it. Emails that
+  differ only by case are now treated as the same, in reads and in imports.
+
 ## [1.6.0] - 2026-11-05
 
 ### Added

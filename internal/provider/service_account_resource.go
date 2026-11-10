@@ -192,8 +192,8 @@ func (r *ServiceAccountResource) Read(ctx context.Context, req resource.ReadRequ
 	}
 
 	state.OrgID = types.StringValue(org)
-	state.ID = types.StringValue(userResourceID(org, account.Email))
 	applyServiceAccountToModel(account, &state)
+	state.ID = types.StringValue(userResourceID(org, state.Email.ValueString()))
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -294,7 +294,7 @@ func (r *ServiceAccountResource) ImportState(ctx context.Context, req resource.I
 	state := ServiceAccountResourceModel{
 		ID:          types.StringValue(req.ID),
 		OrgID:       types.StringValue(parts[0]),
-		Email:       types.StringValue(account.Email),
+		Email:       keepEmailSpelling(types.StringValue(parts[1]), account.Email),
 		CustomRoles: types.SetNull(types.StringType),
 		RotateToken: types.StringNull(),
 		Token:       types.StringValue(""),
@@ -323,7 +323,7 @@ func (r *ServiceAccountResource) refresh(ctx context.Context, org, email string,
 }
 
 func applyServiceAccountToModel(account *UserAPI, model *ServiceAccountResourceModel) {
-	model.Email = types.StringValue(account.Email)
+	model.Email = keepEmailSpelling(model.Email, account.Email)
 	model.FirstName = types.StringValue(account.FirstName)
 	model.LastName = types.StringValue(account.LastName)
 	model.IsSystem = types.BoolValue(account.IsSystem)
