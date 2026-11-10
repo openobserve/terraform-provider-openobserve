@@ -27,6 +27,10 @@ type CreateUserAPI struct {
 }
 
 // UpdateUserAPI is the body of PUT /api/{org}/users/{email}.
+//
+// CustomRole is sent as `null` when nil, which leaves the user's custom roles
+// alone, and as `[]` when empty, which revokes all of them. Omitting empty
+// slices would make the two indistinguishable, so there is no `omitempty`.
 type UpdateUserAPI struct {
 	ChangePassword bool     `json:"change_password"`
 	FirstName      *string  `json:"first_name,omitempty"`
@@ -34,7 +38,7 @@ type UpdateUserAPI struct {
 	OldPassword    *string  `json:"old_password,omitempty"`
 	NewPassword    *string  `json:"new_password,omitempty"`
 	Role           *string  `json:"role,omitempty"`
-	CustomRole     []string `json:"custom_role,omitempty"`
+	CustomRole     []string `json:"custom_role"`
 }
 
 // AddUserToOrgAPI is the body of POST /api/{org}/users/{email}.

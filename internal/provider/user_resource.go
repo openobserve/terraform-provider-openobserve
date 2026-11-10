@@ -231,10 +231,19 @@ func (r *UserResource) Update(ctx context.Context, req resource.UpdateRequest, r
 
 	org := requireOrg(r.client, plan.OrgID, &resp.Diagnostics)
 	customRoles := stringsFromSet(ctx, plan.CustomRoles, &resp.Diagnostics)
+	currentRoles := stringsFromSet(ctx, state.CustomRoles, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	email := plan.Email.ValueString()
+
+	// A nil list leaves the server's custom roles untouched, so removing the
+	// last role from the configuration has to send an explicit empty list.
+	// Only roles this resource granted are revoked: a user that never had
+	// `custom_roles` set keeps the grants an `openobserve_role` made.
+	if len(customRoles) == 0 && len(currentRoles) > 0 {
+		customRoles = []string{}
+	}
 
 	update := UpdateUserAPI{
 		FirstName:  optString(plan.FirstName),
