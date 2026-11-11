@@ -177,6 +177,7 @@ func TestExpectedDataSourcesAreRegistered(t *testing.T) {
 		"openobserve_resources",
 		"openobserve_role",
 		"openobserve_roles",
+		"openobserve_rum_token",
 		"openobserve_service_accounts",
 		"openobserve_slo",
 		"openobserve_slos",

@@ -214,6 +214,7 @@ up` rather than at compile time.
 | `openobserve_function(s)`          | One function with the pipelines using it, or a listing |
 | `openobserve_pipelines`            | Pipelines, with the ids an import needs              |
 | `openobserve_ingestion_tokens`     | Tokens in an organization, without their values      |
+| `openobserve_rum_token`            | The provider user's RUM token for an organization    |
 | `openobserve_synthetics` ‡         | Synthetic checks, with the ids an import needs       |
 | `openobserve_synthetic_locations` ‡| Probe locations, browsers, and viewports available   |
 
