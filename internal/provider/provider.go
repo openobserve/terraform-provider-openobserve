@@ -165,6 +165,7 @@ func (p *OpenObserveProvider) DataSources(_ context.Context) []func() datasource
 		NewSyntheticsDataSource,
 		NewSyntheticLocationsDataSource,
 		NewIngestionTokensDataSource,
+		NewRumTokenDataSource,
 	}
 }
 
