@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`openobserve_user` waits for a role change to show up**
+  ([#34](https://github.com/openobserve/terraform-provider-openobserve/issues/34)). OpenObserve serves user roles from a
+  cache that every node refreshes in the background, so the read after an
+  update could return the previous role and fail the apply with "Provider
+  produced inconsistent result after apply", although the change had been
+  made. The read-back is now retried with backoff, for up to 15 seconds,
+  until the planned `role`, `first_name` and `last_name` show up, as
+  `openobserve_stream` already does for its settings.
+
 ## [1.7.0] - 2026-11-25
 
 ### Added
