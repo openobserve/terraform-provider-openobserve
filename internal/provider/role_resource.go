@@ -311,7 +311,7 @@ func (r *RoleResource) reconcile(ctx context.Context, org, name string, plannedP
 			diags.AddError(enterpriseFeatureError("Custom roles", err))
 			return false
 		}
-		desired := stringsFromSet(ctx, plannedUsers, diags)
+		desired := lowerEmails(stringsFromSet(ctx, plannedUsers, diags))
 		if diags.HasError() {
 			return false
 		}
@@ -344,7 +344,7 @@ func (r *RoleResource) refresh(ctx context.Context, org, name string, model *Rol
 		diags.AddError(enterpriseFeatureError("Custom roles", err))
 		return
 	}
-	model.Users = setFromStrings(ctx, users, diags)
+	model.Users = membersToModel(ctx, model.Users, users, diags)
 }
 
 // expandPermissionObject turns a bare resource type into the object string
@@ -466,4 +466,45 @@ func sortPermissions(in []EntityAuthorization) {
 
 func roleResourceID(orgID, name string) string {
 	return fmt.Sprintf("%s/%s", orgID, name)
+}
+
+// membersToModel renders the emails a role or group holds, keeping the
+// configured spelling of each one the server holds in lowercase, the form the
+// provider sends and OpenObserve stores accounts under.
+//
+// A member the server holds in mixed case was granted under a spelling that
+// is not the account's (an earlier release sent the configured spelling), so
+// the grant does not reach the account. It is shown so that the plan differs
+// from the configuration, and the next apply grants the lowercase form and
+// revokes the mixed-case one.
+func membersToModel(ctx context.Context, prior types.Set, server []string, diags *diag.Diagnostics) types.Set {
+	configured := map[string]string{}
+	exact := map[string]bool{}
+	if !prior.IsNull() && !prior.IsUnknown() {
+		for _, e := range prior.Elements() {
+			if v, ok := e.(types.String); ok && !v.IsNull() && !v.IsUnknown() {
+				configured[strings.ToLower(v.ValueString())] = v.ValueString()
+				exact[v.ValueString()] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(server))
+	seen := map[string]bool{}
+	for _, s := range server {
+		v := s
+		switch lower := strings.ToLower(s); {
+		case s == lower:
+			if c, ok := configured[s]; ok {
+				v = c
+			}
+		case exact[s]:
+			// Shown in lowercase, so that it differs from the configuration.
+			v = lower
+		}
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return setFromStrings(ctx, out, diags)
 }
