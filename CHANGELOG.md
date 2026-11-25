@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed by an unrelated change; set it to `""` to remove the icon. Until
   now, any update of a folder through Terraform, a rename for example,
   removed its icon, because the server replaces the whole folder on update.
+
 ### Fixed
 
 - **`openobserve_user` and `openobserve_service_account` keep the configured
@@ -26,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capitals failed the first apply with "Provider produced inconsistent result
   after apply" and planned a replacement on every run after it. Emails that
   differ only by case are now treated as the same, in reads and in imports.
+- **Custom roles reach accounts whose email has capitals.** OpenObserve
+  records a role grant under the email spelling it is sent, while the
+  account itself is stored in lowercase, so a `custom_roles` entry on a user
+  with a mixed-case `email`, or a mixed-case email in an `openobserve_role`
+  or `openobserve_group` `users` list, granted the role to nobody, and the
+  plan showed no problem. The provider now sends account emails in
+  lowercase and keeps the configured spelling in state. A mixed-case
+  `users` entry an earlier release granted shows as a change on the next
+  plan, and applying it grants the role to the account.
 
 ## [1.6.0] - 2026-11-05
 
