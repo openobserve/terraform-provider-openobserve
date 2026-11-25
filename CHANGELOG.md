@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty list when the configuration no longer names any of the roles it
   granted. A user that never had `custom_roles` set is not affected, so
   grants made through `openobserve_role` stay in place.
+- **`openobserve_rum_token`** data source reads the RUM token of the user the
+  provider signs in as (`GET /api/{org_id}/rumtoken`), so a site's RUM SDK can
+  be configured from Terraform. The RUM intake accepts only this token, not an
+  ingestion token. `token` is sensitive. The server returns the token only to
+  its own user, so per-org tokens need a provider alias signed in as a member
+  of that organization.
 
 ## [1.6.0] - 2026-11-05
 
