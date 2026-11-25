@@ -44,4 +44,5 @@ Read-Only:
 
 - `description` (String) Folder description.
 - `folder_id` (String) Folder identifier.
+- `icon` (String) Folder icon. Null when the folder has none.
 - `name` (String) Folder name.

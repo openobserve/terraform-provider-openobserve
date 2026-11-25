@@ -36,6 +36,9 @@ resource "openobserve_folder" "platform_alerts" {
 
 - `description` (String) Free-form folder description.
 - `folder_type` (String) What the folder holds: `dashboards` (default), `alerts`, `reports`, `synthetics`, or `downtimes`. Downtime folders need OpenObserve Enterprise v1.2.0-rc1 or later.
+- `icon` (String) Icon the UI shows beside the folder name: a Unicode emoji such as `"🚀"`, or an OpenObserve icon reference such as `"o2:redis"`. The server stores it as written and does not check it.
+
+Leave it unset to keep whatever icon the folder has, so one picked in the UI is not removed by an unrelated change. Set it to manage the icon, and a change made elsewhere then shows as drift. Set it to `""` to remove the icon. Needs OpenObserve v1.0.0 or later; older servers ignore it.
 - `org_id` (String) Organization identifier. Defaults to the provider's `org_id`.
 
 ### Read-Only

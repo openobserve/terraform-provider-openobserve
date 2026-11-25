@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`icon` on `openobserve_folder`**, and on the `openobserve_folder` and
+  `openobserve_folders` data sources
+  ([#31](https://github.com/openobserve/terraform-provider-openobserve/issues/31)):
+  a Unicode emoji or an OpenObserve icon reference such as `o2:redis`, which
+  the UI shows beside the folder name. Like the alert settings, an unset
+  `icon` keeps whatever the folder has, so an icon picked in the UI is not
+  removed by an unrelated change; set it to `""` to remove the icon. Until
+  now, any update of a folder through Terraform, a rename for example,
+  removed its icon, because the server replaces the whole folder on update.
+
 ## [1.6.0] - 2026-11-05
 
 ### Added
