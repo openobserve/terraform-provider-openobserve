@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lowercase and keeps the configured spelling in state. A mixed-case
   `users` entry an earlier release granted shows as a change on the next
   plan, and applying it grants the role to the account.
+### Fixed
+
+- **Removing `custom_roles` from an `openobserve_user` revokes them.** The
+  update request dropped an empty role list, which the server reads as "leave
+  the custom roles alone", so deleting the attribute or emptying the set
+  reported success and left every role granted. The provider now sends an
+  empty list when the configuration no longer names any of the roles it
+  granted. A user that never had `custom_roles` set is not affected, so
+  grants made through `openobserve_role` stay in place.
 
 ## [1.6.0] - 2026-11-05
 
