@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -328,17 +329,58 @@ func (r *UserResource) ImportState(ctx context.Context, req resource.ImportState
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
+// readInto reads the user back after a write and stores it in model.
+//
+// OpenObserve can answer that read with the role from before the write: the
+// user list serves roles from an in-memory organization-user cache that every
+// node, the one that took the write included, refreshes only when the
+// coordinator event for the change arrives. The read is therefore retried,
+// with backoff, until every planned value shows up or userReadBackTimeout
+// passes. A value that never shows up is still stored, so Terraform reports it
+// as before. Once one read has succeeded, a failed retry stops the retries and
+// keeps that read, with a warning, instead of failing the apply.
 func (r *UserResource) readInto(ctx context.Context, org, email string, model *UserResourceModel, diags *diag.Diagnostics) {
-	user, err := r.client.GetUser(ctx, org, email)
-	if err != nil {
-		diags.AddError("Error reading user after write", err.Error())
-		return
+	planned := *model
+	deadline := time.Now().Add(userReadBackTimeout)
+	interval := userReadBackInterval
+	var last *UserResourceModel
+	for {
+		user, err := r.client.GetUser(ctx, org, email)
+		if (err != nil || user == nil) && last != nil {
+			reason := "the user was not found"
+			if err != nil {
+				reason = err.Error()
+			}
+			diags.AddWarning("User may not reflect the latest write",
+				fmt.Sprintf("Re-reading user %q after the write failed (%s), so its state comes from an earlier read that did not yet show every planned value.", email, reason))
+			*model = *last
+			return
+		}
+		if err != nil {
+			diags.AddError("Error reading user after write", err.Error())
+			return
+		}
+		if user == nil {
+			diags.AddError("User not found after write", fmt.Sprintf("User %q was not found in org %q after being written.", email, org))
+			return
+		}
+
+		got := planned
+		r.applyUserToModel(user, &got)
+		if userMatchesPlan(planned, got) || !time.Now().Add(interval).Before(deadline) {
+			*model = got
+			return
+		}
+		last = &got
+
+		select {
+		case <-ctx.Done():
+			diags.AddError("Error reading user after write", ctx.Err().Error())
+			return
+		case <-time.After(interval):
+		}
+		interval = min(interval*2, 2*time.Second)
 	}
-	if user == nil {
-		diags.AddError("User not found after write", fmt.Sprintf("User %q was not found in org %q after being written.", email, org))
-		return
-	}
-	r.applyUserToModel(user, model)
 }
 
 func (r *UserResource) applyUserToModel(user *UserAPI, model *UserResourceModel) {
@@ -366,6 +408,30 @@ func keepEmailSpelling(current types.String, stored string) types.String {
 		return current
 	}
 	return types.StringValue(stored)
+}
+
+var (
+	userReadBackTimeout  = 15 * time.Second
+	userReadBackInterval = 250 * time.Millisecond
+)
+
+// userMatchesPlan reports whether every profile value set in the plan came
+// back unchanged, which Terraform requires of the applied state. Values left
+// unset in the configuration are whatever the server reports.
+func userMatchesPlan(planned, got UserResourceModel) bool {
+	for _, pair := range [][2]types.String{
+		{planned.Role, got.Role},
+		{planned.FirstName, got.FirstName},
+		{planned.LastName, got.LastName},
+	} {
+		if pair[0].IsNull() || pair[0].IsUnknown() {
+			continue
+		}
+		if !pair[0].Equal(pair[1]) {
+			return false
+		}
+	}
+	return true
 }
 
 func userResourceID(orgID, email string) string {
