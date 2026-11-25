@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -103,8 +104,9 @@ func (r *FolderResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 					"not check it.\n\n" +
 					"Leave it unset to keep whatever icon the folder has, so one picked in the UI is not removed " +
 					"by an unrelated change. Set it to manage the icon, and a change made elsewhere then shows as " +
-					"drift. Set it to `\"\"` to remove the icon. Needs OpenObserve v1.0.0 or later; older " +
-					"servers ignore it.",
+					"drift. Set it to `\"\"` to remove the icon. Needs OpenObserve v1.0.0 or later: an older " +
+					"server drops the icon, which the provider reports as a warning on create and an error on " +
+					"update.",
 			},
 		},
 	}
@@ -152,7 +154,15 @@ func (r *FolderResource) Create(ctx context.Context, req resource.CreateRequest,
 		folderID = found.FolderID
 		created = found
 	}
+	wanted := plan.Icon
 	plan.Icon = clearedStringToModel(plan.Icon, created.Icon)
+	if iconDropped(wanted, plan.Icon) {
+		// A warning, not an error: an error on create taints the folder. State
+		// keeps the planned icon, so Terraform accepts the create, and the next
+		// refresh shows the difference.
+		plan.Icon = wanted
+		resp.Diagnostics.AddAttributeWarning(path.Root("icon"), iconDroppedSummary, iconDroppedDetail)
+	}
 
 	plan.OrgID = types.StringValue(org)
 	plan.FolderID = types.StringValue(folderID)
@@ -243,6 +253,26 @@ func (r *FolderResource) Update(ctx context.Context, req resource.UpdateRequest,
 	plan.FolderID = types.StringValue(folderID)
 	plan.ID = types.StringValue(folderResourceID(org, folderType, folderID))
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+
+	// A server older than folder icons drops the field without an error.
+	if !config.Icon.IsNull() && config.Icon.ValueString() != "" {
+		if after, err := r.client.GetFolder(ctx, org, folderType, folderID); err == nil && after != nil &&
+			iconDropped(config.Icon, clearedStringToModel(config.Icon, after.Icon)) {
+			resp.Diagnostics.AddAttributeError(path.Root("icon"), iconDroppedSummary, iconDroppedDetail)
+		}
+	}
+}
+
+const iconDroppedSummary = "The server did not keep the folder icon"
+
+const iconDroppedDetail = "The folder was saved, but the server reports no icon. Folder icons need OpenObserve " +
+	"v1.0.0 or later, and older servers drop the field without an error. Upgrade the server, or remove `icon` " +
+	"from the configuration."
+
+// iconDropped reports whether a configured icon is missing from what the
+// server kept.
+func iconDropped(wanted, got types.String) bool {
+	return !wanted.IsNull() && !wanted.IsUnknown() && wanted.ValueString() != "" && !wanted.Equal(got)
 }
 
 func (r *FolderResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {

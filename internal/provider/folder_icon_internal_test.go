@@ -2,7 +2,13 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
@@ -124,5 +130,67 @@ func TestFolderCreateIcon(t *testing.T) {
 	created := fake.get("/api/v2/default/folders/dashboards/before")
 	if created == nil || created["icon"] != "🚀" {
 		t.Errorf("POST body: %v", created)
+	}
+}
+
+// oldFolderServer stores folders without their icon, as servers older than
+// v1.0.0 do.
+func oldFolderServer(t *testing.T) *Client {
+	t.Helper()
+	stored := map[string]any{"folderId": "f1", "name": "before", "description": ""}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(stored)
+		default:
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			stored["name"] = body["name"]
+			_ = json.NewEncoder(w).Encode(stored)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return newClient(srv.URL, "u", "p", "default")
+}
+
+// On a server that drops the icon, create warns and keeps the planned icon in
+// state, so the folder is not tainted; update fails with the same message.
+func TestFolderIconOnOldServer(t *testing.T) {
+	t.Parallel()
+	r := &FolderResource{client: oldFolderServer(t)}
+	plan := folderModel("before", types.StringValue("🚀"))
+	plan.ID, plan.FolderID = types.StringUnknown(), types.StringUnknown()
+	p := tfValue(t, r, plan)
+	cresp := &resource.CreateResponse{State: tfsdk.State{Schema: p.Schema, Raw: tftypes.NewValue(p.Schema.Type().TerraformType(context.Background()), nil)}}
+	r.Create(context.Background(), resource.CreateRequest{Plan: tfsdk.Plan(p), Config: tfsdk.Config(p)}, cresp)
+	if cresp.Diagnostics.HasError() || cresp.Diagnostics.WarningsCount() != 1 {
+		t.Fatalf("create: %v", cresp.Diagnostics)
+	}
+	var got FolderResourceModel
+	if d := cresp.State.Get(context.Background(), &got); d.HasError() || got.Icon.ValueString() != "🚀" {
+		t.Errorf("create state icon: %v %v", got.Icon, d)
+	}
+
+	req, uresp := updateRequest(t, r, folderModel("after", types.StringValue("🚀")),
+		folderModel("before", types.StringNull()), folderModel("after", types.StringValue("🚀")))
+	r.Update(context.Background(), req, uresp)
+	if !uresp.Diagnostics.HasError() {
+		t.Error("update: want an error")
+	}
+}
+
+func TestDistinctEmailsValidator(t *testing.T) {
+	t.Parallel()
+	run := func(v ...string) bool {
+		resp := &validator.SetResponse{}
+		distinctEmailsValidator{}.ValidateSet(context.Background(),
+			validator.SetRequest{Path: path.Root("users"), ConfigValue: stringSet(v...)}, resp)
+		return resp.Diagnostics.HasError()
+	}
+	if !run("Alice@x.com", "alice@x.com") {
+		t.Error("case duplicates must be refused")
+	}
+	if run("Alice@x.com", "bob@x.com") {
+		t.Error("distinct emails must pass")
 	}
 }

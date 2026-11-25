@@ -82,6 +82,7 @@ func (r *GroupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Computed:    true,
 				ElementType: types.StringType,
 				Description: "Emails of the group's members.",
+				Validators:  []validator.Set{distinctEmailsValidator{}},
 			},
 			"roles": schema.SetAttribute{
 				Optional:    true,

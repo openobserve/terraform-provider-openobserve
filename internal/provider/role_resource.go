@@ -134,6 +134,7 @@ func (r *RoleResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 					"`openobserve_group` are not listed, because the group holds the grant rather than the user.\n\n" +
 					"~> Assign a role from one side only. Listing a user here and naming the same role in that user's " +
 					"`custom_roles` writes the same grant from two resources, and each will try to remove the other's.",
+				Validators: []validator.Set{distinctEmailsValidator{}},
 			},
 		},
 	}
@@ -507,4 +508,38 @@ func membersToModel(ctx context.Context, prior types.Set, server []string, diags
 		}
 	}
 	return setFromStrings(ctx, out, diags)
+}
+
+// distinctEmailsValidator refuses two emails that differ only by case.
+// OpenObserve stores accounts in lowercase, so both name the same account and
+// the server keeps one membership, which a two-element set cannot match.
+type distinctEmailsValidator struct{}
+
+func (distinctEmailsValidator) Description(context.Context) string {
+	return "must not list the same email twice in different case"
+}
+
+func (v distinctEmailsValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (distinctEmailsValidator) ValidateSet(_ context.Context, req validator.SetRequest, resp *validator.SetResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	seen := map[string]string{}
+	for _, e := range req.ConfigValue.Elements() {
+		v, ok := e.(types.String)
+		if !ok || v.IsNull() || v.IsUnknown() {
+			continue
+		}
+		key := strings.ToLower(v.ValueString())
+		if prev, dup := seen[key]; dup {
+			resp.Diagnostics.AddAttributeError(req.Path, "Same email listed twice",
+				fmt.Sprintf("%q and %q are the same account: OpenObserve ignores case in emails. List it once.",
+					prev, v.ValueString()))
+			return
+		}
+		seen[key] = v.ValueString()
+	}
 }
