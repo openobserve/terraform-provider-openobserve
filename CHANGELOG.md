@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-25
+
 ### Added
 
 - **`openobserve_rum_token`** data source
@@ -839,7 +841,8 @@ a stream or dashboard onto the new schema without touching the server.
 - Comprehensive examples for all resources and data sources
 - Apache 2.0 license
 
-[Unreleased]: https://github.com/openobserve/terraform-provider-openobserve/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/openobserve/terraform-provider-openobserve/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.7.0
 [1.6.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.6.0
 [1.5.0]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.5.0
 [1.4.3]: https://github.com/openobserve/terraform-provider-openobserve/releases/tag/v1.4.3
