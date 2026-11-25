@@ -136,7 +136,9 @@ func (r *UserResource) Create(ctx context.Context, req resource.CreateRequest, r
 	email := plan.Email.ValueString()
 
 	createErr := r.client.CreateUser(ctx, org, CreateUserAPI{
-		Email:      email,
+		// The server lowercases it too; sent lowercase so that a custom role
+		// granted with the create is recorded under the account's email.
+		Email:      strings.ToLower(email),
 		FirstName:  plan.FirstName.ValueString(),
 		LastName:   plan.LastName.ValueString(),
 		Password:   plan.Password.ValueString(),

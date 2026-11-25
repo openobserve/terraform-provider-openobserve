@@ -68,7 +68,7 @@ func TestMembersToModel(t *testing.T) {
 		{"legacy mixed-case grant", set("Jane@Example.com"), []string{"Jane@Example.com"}, []string{"jane@example.com"}},
 		{"legacy and repaired", set("Jane@Example.com"), []string{"Jane@Example.com", "jane@example.com"},
 			[]string{"Jane@Example.com", "jane@example.com"}},
-		{"mixed case written elsewhere", set("jane@example.com"), []string{"Jane@Example.com"}, []string{"Jane@Example.com"}},
+		{"legacy, state already lowercase", set("jane@example.com"), []string{"Jane@Example.com"}, []string{"jane@example.com"}},
 	}
 	for _, tc := range cases {
 		var d diag.Diagnostics
@@ -87,5 +87,26 @@ func TestLowerEmails(t *testing.T) {
 	}
 	if lowerEmails(nil) != nil {
 		t.Error("nil must stay nil")
+	}
+}
+
+// Refreshing the result again gives the same answer, whatever state holds.
+func TestMembersToModelIsStable(t *testing.T) {
+	t.Parallel()
+	for _, server := range [][]string{
+		{"Jane@Example.com"},
+		{"Jane@Example.com", "jane@example.com"},
+		{"jane@example.com", "bob@example.com"},
+	} {
+		var d diag.Diagnostics
+		state := stringSet("Jane@Example.com")
+		first := membersToModel(context.Background(), state, server, &d)
+		for i := 0; i < 4; i++ {
+			next := membersToModel(context.Background(), first, server, &d)
+			if !next.Equal(first) {
+				t.Errorf("server %v: refresh %d gave %v after %v", server, i, next, first)
+			}
+			first = next
+		}
 	}
 }

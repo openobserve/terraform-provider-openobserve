@@ -156,6 +156,13 @@ func (r *FolderResource) Create(ctx context.Context, req resource.CreateRequest,
 	}
 	wanted := plan.Icon
 	plan.Icon = clearedStringToModel(plan.Icon, created.Icon)
+	// The create response may leave the icon out, so a configured one that
+	// seems missing is checked against the stored folder.
+	if iconDropped(wanted, plan.Icon) {
+		if stored, err := r.client.GetFolder(ctx, org, folderType, folderID); err == nil && stored != nil {
+			plan.Icon = clearedStringToModel(wanted, stored.Icon)
+		}
+	}
 	if iconDropped(wanted, plan.Icon) {
 		// A warning, not an error: an error on create taints the folder. State
 		// keeps the planned icon, so Terraform accepts the create, and the next

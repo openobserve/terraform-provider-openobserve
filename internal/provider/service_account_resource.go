@@ -139,7 +139,7 @@ func (r *ServiceAccountResource) Create(ctx context.Context, req resource.Create
 	email := plan.Email.ValueString()
 
 	created, err := r.client.CreateServiceAccount(ctx, org, ServiceAccountAPI{
-		Email:     email,
+		Email:     strings.ToLower(email),
 		FirstName: plan.FirstName.ValueString(),
 		LastName:  plan.LastName.ValueString(),
 	})

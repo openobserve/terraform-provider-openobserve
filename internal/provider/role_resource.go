@@ -475,32 +475,33 @@ func roleResourceID(orgID, name string) string {
 //
 // A member the server holds in mixed case was granted under a spelling that
 // is not the account's (an earlier release sent the configured spelling), so
-// the grant does not reach the account. It is shown so that the plan differs
-// from the configuration, and the next apply grants the lowercase form and
-// revokes the mixed-case one.
+// the grant does not reach the account. It is always shown in lowercase: that
+// differs from a mixed-case configuration, so the plan shows it, and the next
+// apply grants the lowercase form and revokes the mixed-case one. The result
+// depends only on the server and on the configured spellings of lowercase
+// members, so refreshing it again gives the same answer.
 func membersToModel(ctx context.Context, prior types.Set, server []string, diags *diag.Diagnostics) types.Set {
 	configured := map[string]string{}
-	exact := map[string]bool{}
 	if !prior.IsNull() && !prior.IsUnknown() {
 		for _, e := range prior.Elements() {
 			if v, ok := e.(types.String); ok && !v.IsNull() && !v.IsUnknown() {
-				configured[strings.ToLower(v.ValueString())] = v.ValueString()
-				exact[v.ValueString()] = true
+				// Prefer a spelling with capitals over the lowercase one when
+				// both are present, so the choice does not depend on set order.
+				key := strings.ToLower(v.ValueString())
+				if prev, ok := configured[key]; !ok || prev == key {
+					configured[key] = v.ValueString()
+				}
 			}
 		}
 	}
 	out := make([]string, 0, len(server))
 	seen := map[string]bool{}
 	for _, s := range server {
-		v := s
-		switch lower := strings.ToLower(s); {
-		case s == lower:
+		v := strings.ToLower(s)
+		if v == s {
 			if c, ok := configured[s]; ok {
 				v = c
 			}
-		case exact[s]:
-			// Shown in lowercase, so that it differs from the configuration.
-			v = lower
 		}
 		if !seen[v] {
 			seen[v] = true
