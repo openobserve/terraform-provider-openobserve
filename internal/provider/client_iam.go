@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 )
 
 // ---------------------------------------------------------------------------
@@ -27,6 +28,10 @@ type CreateUserAPI struct {
 }
 
 // UpdateUserAPI is the body of PUT /api/{org}/users/{email}.
+//
+// CustomRole is sent as `null` when nil, which leaves the user's custom roles
+// alone, and as `[]` when empty, which revokes all of them. Omitting empty
+// slices would make the two indistinguishable, so there is no `omitempty`.
 type UpdateUserAPI struct {
 	ChangePassword bool     `json:"change_password"`
 	FirstName      *string  `json:"first_name,omitempty"`
@@ -34,7 +39,7 @@ type UpdateUserAPI struct {
 	OldPassword    *string  `json:"old_password,omitempty"`
 	NewPassword    *string  `json:"new_password,omitempty"`
 	Role           *string  `json:"role,omitempty"`
-	CustomRole     []string `json:"custom_role,omitempty"`
+	CustomRole     []string `json:"custom_role"`
 }
 
 // AddUserToOrgAPI is the body of POST /api/{org}/users/{email}.
@@ -121,7 +126,7 @@ func (c *Client) GetUser(ctx context.Context, orgID, email string) (*UserAPI, er
 
 // UpdateUser changes an existing user's profile, role, or password.
 func (c *Client) UpdateUser(ctx context.Context, orgID, email string, req UpdateUserAPI) error {
-	path := fmt.Sprintf("/api/%s/users/%s", pathEscape(orgID), pathEscape(email))
+	path := fmt.Sprintf("/api/%s/users/%s", pathEscape(orgID), emailPath(email))
 	return c.do(ctx, http.MethodPut, path, req)
 }
 
@@ -130,13 +135,13 @@ func (c *Client) UpdateUser(ctx context.Context, orgID, email string, req Update
 // A user who is already a member answers with HTTP 409; callers that are
 // reconciling toward that state should treat it as success.
 func (c *Client) AddUserToOrg(ctx context.Context, orgID, email string, req AddUserToOrgAPI) error {
-	path := fmt.Sprintf("/api/%s/users/%s", pathEscape(orgID), pathEscape(email))
+	path := fmt.Sprintf("/api/%s/users/%s", pathEscape(orgID), emailPath(email))
 	return c.do(ctx, http.MethodPost, path, req)
 }
 
 // DeleteUser removes a user from an organization.
 func (c *Client) DeleteUser(ctx context.Context, orgID, email string) error {
-	return c.deleteIgnoreMissing(ctx, fmt.Sprintf("/api/%s/users/%s", pathEscape(orgID), pathEscape(email)))
+	return c.deleteIgnoreMissing(ctx, fmt.Sprintf("/api/%s/users/%s", pathEscape(orgID), emailPath(email)))
 }
 
 // UserRoleOption is one entry of the built-in role list.
@@ -212,13 +217,13 @@ func (c *Client) GetServiceAccount(ctx context.Context, orgID, email string) (*U
 
 // UpdateServiceAccount changes a service account's display name.
 func (c *Client) UpdateServiceAccount(ctx context.Context, orgID, email string, req ServiceAccountAPI) error {
-	path := fmt.Sprintf("/api/%s/service_accounts/%s", pathEscape(orgID), pathEscape(email))
+	path := fmt.Sprintf("/api/%s/service_accounts/%s", pathEscape(orgID), emailPath(email))
 	return c.do(ctx, http.MethodPut, path, req)
 }
 
 // RotateServiceAccountToken issues a fresh API token, invalidating the old one.
 func (c *Client) RotateServiceAccountToken(ctx context.Context, orgID, email string) (*APITokenResponse, error) {
-	path := fmt.Sprintf("/api/%s/service_accounts/%s?rotateToken=true", pathEscape(orgID), pathEscape(email))
+	path := fmt.Sprintf("/api/%s/service_accounts/%s?rotateToken=true", pathEscape(orgID), emailPath(email))
 	var out APITokenResponse
 	if err := c.doJSON(ctx, http.MethodPut, path, ServiceAccountAPI{}, &out); err != nil {
 		return nil, err
@@ -228,7 +233,7 @@ func (c *Client) RotateServiceAccountToken(ctx context.Context, orgID, email str
 
 // DeleteServiceAccount removes a service account and revokes its token.
 func (c *Client) DeleteServiceAccount(ctx context.Context, orgID, email string) error {
-	path := fmt.Sprintf("/api/%s/service_accounts/%s", pathEscape(orgID), pathEscape(email))
+	path := fmt.Sprintf("/api/%s/service_accounts/%s", pathEscape(orgID), emailPath(email))
 	return c.deleteIgnoreMissing(ctx, path)
 }
 
@@ -346,7 +351,7 @@ func (c *Client) ListResources(ctx context.Context, orgID string) ([]ResourceAPI
 
 // GetUserRoles returns the custom roles assigned to a user.
 func (c *Client) GetUserRoles(ctx context.Context, orgID, email string) ([]string, error) {
-	path := fmt.Sprintf("/api/%s/users/%s/roles", pathEscape(orgID), pathEscape(email))
+	path := fmt.Sprintf("/api/%s/users/%s/roles", pathEscape(orgID), emailPath(email))
 	var out []string
 	if err := c.doJSON(ctx, http.MethodGet, path, nil, &out); err != nil {
 		return nil, err
@@ -357,7 +362,7 @@ func (c *Client) GetUserRoles(ctx context.Context, orgID, email string) ([]strin
 
 // GetUserGroups returns the groups a user belongs to.
 func (c *Client) GetUserGroups(ctx context.Context, orgID, email string) ([]string, error) {
-	path := fmt.Sprintf("/api/%s/users/%s/groups", pathEscape(orgID), pathEscape(email))
+	path := fmt.Sprintf("/api/%s/users/%s/groups", pathEscape(orgID), emailPath(email))
 	var out []string
 	if err := c.doJSON(ctx, http.MethodGet, path, nil, &out); err != nil {
 		return nil, err
@@ -457,4 +462,27 @@ func (c *Client) UpdateGroup(ctx context.Context, orgID, name string, req Update
 // DeleteGroup removes a group.
 func (c *Client) DeleteGroup(ctx context.Context, orgID, name string) error {
 	return c.deleteIgnoreMissing(ctx, fmt.Sprintf("/api/%s/groups/%s", pathEscape(orgID), pathEscape(name)))
+}
+
+// emailPath is an account's email as an API path segment. OpenObserve
+// lowercases an email when it creates the account, and its lookups ignore
+// case, but a role grant made through a path is recorded under the path's
+// spelling. A mixed-case email in the path would grant the role to an
+// identity that is not the account, so the path always carries the lowercase
+// form the server stores.
+func emailPath(email string) string {
+	return pathEscape(strings.ToLower(email))
+}
+
+// lowerEmails returns emails in the lowercase form the server stores, for
+// role and group memberships, which are recorded under the spelling sent.
+func lowerEmails(emails []string) []string {
+	if emails == nil {
+		return nil
+	}
+	out := make([]string, len(emails))
+	for i, e := range emails {
+		out[i] = strings.ToLower(e)
+	}
+	return out
 }

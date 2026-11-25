@@ -37,4 +37,5 @@ resource "openobserve_dashboard" "example" {
 ### Read-Only
 
 - `description` (String) Folder description.
+- `icon` (String) Folder icon, an emoji or an `o2:` reference. Null when the folder has none.
 - `id` (String) Data source ID in the format `{org_id}/{folder_type}/{folder_id}`.

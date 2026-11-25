@@ -18,6 +18,9 @@ type FolderAPI struct {
 	FolderID    string `json:"folderId,omitempty"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	// Icon is an opaque token, a Unicode emoji or an "o2:" registry
+	// reference such as "o2:redis". The server stores an empty one as none.
+	Icon *string `json:"icon,omitempty"`
 }
 
 // FolderListAPI wraps the folder list response.

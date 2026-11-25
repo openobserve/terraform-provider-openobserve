@@ -134,6 +134,7 @@ func (r *RoleResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 					"`openobserve_group` are not listed, because the group holds the grant rather than the user.\n\n" +
 					"~> Assign a role from one side only. Listing a user here and naming the same role in that user's " +
 					"`custom_roles` writes the same grant from two resources, and each will try to remove the other's.",
+				Validators: []validator.Set{distinctEmailsValidator{}},
 			},
 		},
 	}
@@ -311,7 +312,7 @@ func (r *RoleResource) reconcile(ctx context.Context, org, name string, plannedP
 			diags.AddError(enterpriseFeatureError("Custom roles", err))
 			return false
 		}
-		desired := stringsFromSet(ctx, plannedUsers, diags)
+		desired := lowerEmails(stringsFromSet(ctx, plannedUsers, diags))
 		if diags.HasError() {
 			return false
 		}
@@ -344,7 +345,7 @@ func (r *RoleResource) refresh(ctx context.Context, org, name string, model *Rol
 		diags.AddError(enterpriseFeatureError("Custom roles", err))
 		return
 	}
-	model.Users = setFromStrings(ctx, users, diags)
+	model.Users = membersToModel(ctx, model.Users, users, diags)
 }
 
 // expandPermissionObject turns a bare resource type into the object string
@@ -466,4 +467,80 @@ func sortPermissions(in []EntityAuthorization) {
 
 func roleResourceID(orgID, name string) string {
 	return fmt.Sprintf("%s/%s", orgID, name)
+}
+
+// membersToModel renders the emails a role or group holds, keeping the
+// configured spelling of each one the server holds in lowercase, the form the
+// provider sends and OpenObserve stores accounts under.
+//
+// A member the server holds in mixed case was granted under a spelling that
+// is not the account's (an earlier release sent the configured spelling), so
+// the grant does not reach the account. It is always shown in lowercase: that
+// differs from a mixed-case configuration, so the plan shows it, and the next
+// apply grants the lowercase form and revokes the mixed-case one. The result
+// depends only on the server and on the configured spellings of lowercase
+// members, so refreshing it again gives the same answer.
+func membersToModel(ctx context.Context, prior types.Set, server []string, diags *diag.Diagnostics) types.Set {
+	configured := map[string]string{}
+	if !prior.IsNull() && !prior.IsUnknown() {
+		for _, e := range prior.Elements() {
+			if v, ok := e.(types.String); ok && !v.IsNull() && !v.IsUnknown() {
+				// Prefer a spelling with capitals over the lowercase one when
+				// both are present, so the choice does not depend on set order.
+				key := strings.ToLower(v.ValueString())
+				if prev, ok := configured[key]; !ok || prev == key {
+					configured[key] = v.ValueString()
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(server))
+	seen := map[string]bool{}
+	for _, s := range server {
+		v := strings.ToLower(s)
+		if v == s {
+			if c, ok := configured[s]; ok {
+				v = c
+			}
+		}
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return setFromStrings(ctx, out, diags)
+}
+
+// distinctEmailsValidator refuses two emails that differ only by case.
+// OpenObserve stores accounts in lowercase, so both name the same account and
+// the server keeps one membership, which a two-element set cannot match.
+type distinctEmailsValidator struct{}
+
+func (distinctEmailsValidator) Description(context.Context) string {
+	return "must not list the same email twice in different case"
+}
+
+func (v distinctEmailsValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (distinctEmailsValidator) ValidateSet(_ context.Context, req validator.SetRequest, resp *validator.SetResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	seen := map[string]string{}
+	for _, e := range req.ConfigValue.Elements() {
+		v, ok := e.(types.String)
+		if !ok || v.IsNull() || v.IsUnknown() {
+			continue
+		}
+		key := strings.ToLower(v.ValueString())
+		if prev, dup := seen[key]; dup {
+			resp.Diagnostics.AddAttributeError(req.Path, "Same email listed twice",
+				fmt.Sprintf("%q and %q are the same account: OpenObserve ignores case in emails. List it once.",
+					prev, v.ValueString()))
+			return
+		}
+		seen[key] = v.ValueString()
+	}
 }

@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`openobserve_rum_token`** data source
+  ([#29](https://github.com/openobserve/terraform-provider-openobserve/issues/29), [#30](https://github.com/openobserve/terraform-provider-openobserve/pull/30)) reads the RUM token of the user
+  the provider signs in as (`GET /api/{org_id}/rumtoken`), so a site's RUM
+  SDK can be configured from Terraform. The RUM intake accepts only this
+  token, not an ingestion token. `token` is sensitive. The server returns the
+  token only to its own user, so per-org tokens need a provider alias signed
+  in as a member of that organization.
+- **`icon` on `openobserve_folder`**, and on the `openobserve_folder` and
+  `openobserve_folders` data sources ([#31](https://github.com/openobserve/terraform-provider-openobserve/issues/31)): a Unicode emoji
+  or an OpenObserve icon reference such as `o2:redis`, which the UI shows
+  beside the folder name. Like the alert settings, an unset `icon` keeps
+  whatever the folder has, so an icon picked in the UI is not removed by an
+  unrelated change; set it to `""` to remove the icon. Until now, any update
+  of a folder through Terraform, a rename for example, removed its icon,
+  because the server replaces the whole folder on update. Needs OpenObserve
+  v1.0.0 or later.
+
+### Fixed
+
+- **`openobserve_user` and `openobserve_service_account` keep the configured
+  `email` spelling** ([#27](https://github.com/openobserve/terraform-provider-openobserve/pull/27)). OpenObserve lowercases an email
+  when it creates the account, and the provider stored the server's
+  spelling, so an `email` with capitals failed the first apply with
+  "Provider produced inconsistent result after apply" and planned a
+  replacement on every run after it. Emails that differ only by case are now
+  treated as the same, in reads and in imports.
+- **Custom roles reach accounts whose email has capitals.** OpenObserve
+  records a role grant under the email spelling it is sent, while the
+  account itself is stored in lowercase, so a `custom_roles` entry on a user
+  with a mixed-case `email`, or a mixed-case email in an `openobserve_role`
+  or `openobserve_group` `users` list, granted the role to nobody, and the
+  plan showed no problem. The provider now sends account emails in
+  lowercase and keeps the configured spelling in state. A mixed-case
+  `users` entry an earlier release granted shows as a change on the next
+  plan, and applying it grants the role to the account. Listing the same
+  email twice in different case in `users` is now refused at plan time.
+- **Removing `custom_roles` from an `openobserve_user` revokes them**
+  ([#28](https://github.com/openobserve/terraform-provider-openobserve/pull/28)). The update request dropped an empty role list, which
+  the server reads as "leave the custom roles alone", so deleting the
+  attribute or emptying the set reported success and left every role
+  granted. The provider now sends an empty list when the configuration no
+  longer names any of the roles it granted. A user that never had
+  `custom_roles` set is not affected, so grants made through
+  `openobserve_role` stay in place.
+
+### Changed
+
+- Updated the `golang.org/x` modules and `google.golang.org/grpc`
+  ([#25](https://github.com/openobserve/terraform-provider-openobserve/pull/25)).
+
 ## [1.6.0] - 2026-11-05
 
 ### Added

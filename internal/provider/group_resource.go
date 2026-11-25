@@ -82,6 +82,7 @@ func (r *GroupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Computed:    true,
 				ElementType: types.StringType,
 				Description: "Emails of the group's members.",
+				Validators:  []validator.Set{distinctEmailsValidator{}},
 			},
 			"roles": schema.SetAttribute{
 				Optional:    true,
@@ -156,7 +157,7 @@ func (r *GroupResource) Read(ctx context.Context, req resource.ReadRequest, resp
 
 	state.OrgID = types.StringValue(org)
 	state.ID = types.StringValue(groupResourceID(org, group.Name))
-	state.Users = setFromStrings(ctx, group.Users, &resp.Diagnostics)
+	state.Users = membersToModel(ctx, state.Users, group.Users, &resp.Diagnostics)
 	state.Roles = setFromStrings(ctx, group.Roles, &resp.Diagnostics)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -230,7 +231,7 @@ func (r *GroupResource) ImportState(ctx context.Context, req resource.ImportStat
 		ID:    types.StringValue(req.ID),
 		OrgID: types.StringValue(parts[0]),
 		Name:  types.StringValue(group.Name),
-		Users: setFromStrings(ctx, group.Users, &resp.Diagnostics),
+		Users: membersToModel(ctx, types.SetNull(types.StringType), group.Users, &resp.Diagnostics),
 		Roles: setFromStrings(ctx, group.Roles, &resp.Diagnostics),
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -248,7 +249,7 @@ func (r *GroupResource) reconcile(ctx context.Context, org, name string, users, 
 		return false
 	}
 
-	addUsers, removeUsers := diffStrings(current.Users, users)
+	addUsers, removeUsers := diffStrings(current.Users, lowerEmails(users))
 	addRoles, removeRoles := diffStrings(current.Roles, roles)
 	if len(addUsers)+len(removeUsers)+len(addRoles)+len(removeRoles) == 0 {
 		return true
@@ -277,7 +278,7 @@ func (r *GroupResource) refresh(ctx context.Context, org, name string, model *Gr
 		diags.AddError("Group not found after write", fmt.Sprintf("Group %q was not found in org %q after being written.", name, org))
 		return
 	}
-	model.Users = setFromStrings(ctx, group.Users, diags)
+	model.Users = membersToModel(ctx, model.Users, group.Users, diags)
 	model.Roles = setFromStrings(ctx, group.Roles, diags)
 }
 

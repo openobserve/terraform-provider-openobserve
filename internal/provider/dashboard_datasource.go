@@ -37,6 +37,7 @@ type FolderDataSourceModel struct {
 	FolderID    types.String `tfsdk:"folder_id"`
 	Name        types.String `tfsdk:"name"`
 	Description types.String `tfsdk:"description"`
+	Icon        types.String `tfsdk:"icon"`
 }
 
 func (d *FolderDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
@@ -67,6 +68,7 @@ func (d *FolderDataSource) Schema(_ context.Context, _ datasource.SchemaRequest,
 				Description: "Folder name. Supply this or `folder_id`.",
 			},
 			"description": schema.StringAttribute{Computed: true, Description: "Folder description."},
+			"icon":        schema.StringAttribute{Computed: true, Description: "Folder icon, an emoji or an `o2:` reference. Null when the folder has none."},
 		},
 	}
 }
@@ -127,6 +129,7 @@ func (d *FolderDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 	data.FolderID = types.StringValue(folderID)
 	data.Name = types.StringValue(folder.Name)
 	data.Description = types.StringValue(folder.Description)
+	data.Icon = clearedStringToModel(types.StringNull(), folder.Icon)
 	data.ID = types.StringValue(folderResourceID(org, folderType, folderID))
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -150,6 +153,7 @@ var folderAttrTypes = map[string]attr.Type{
 	"folder_id":   types.StringType,
 	"name":        types.StringType,
 	"description": types.StringType,
+	"icon":        types.StringType,
 }
 
 func (d *FoldersDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
@@ -176,6 +180,7 @@ func (d *FoldersDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 						"folder_id":   schema.StringAttribute{Computed: true, Description: "Folder identifier."},
 						"name":        schema.StringAttribute{Computed: true, Description: "Folder name."},
 						"description": schema.StringAttribute{Computed: true, Description: "Folder description."},
+						"icon":        schema.StringAttribute{Computed: true, Description: "Folder icon. Null when the folder has none."},
 					},
 				},
 			},
@@ -215,6 +220,7 @@ func (d *FoldersDataSource) Read(ctx context.Context, req datasource.ReadRequest
 			"folder_id":   types.StringValue(f.FolderID),
 			"name":        types.StringValue(f.Name),
 			"description": types.StringValue(f.Description),
+			"icon":        clearedStringToModel(types.StringNull(), f.Icon),
 		}, &resp.Diagnostics))
 	}
 	list, diags := types.ListValue(types.ObjectType{AttrTypes: folderAttrTypes}, values)

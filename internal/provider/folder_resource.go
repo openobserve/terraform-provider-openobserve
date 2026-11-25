@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -42,6 +43,7 @@ type FolderResourceModel struct {
 	FolderType  types.String `tfsdk:"folder_type"`
 	Name        types.String `tfsdk:"name"`
 	Description types.String `tfsdk:"description"`
+	Icon        types.String `tfsdk:"icon"`
 }
 
 func (r *FolderResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -91,6 +93,21 @@ func (r *FolderResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Default:     stringdefault.StaticString(""),
 				Description: "Free-form folder description.",
 			},
+			"icon": schema.StringAttribute{
+				Optional: true,
+				Computed: true,
+				// Unset, the plan carries the value last read and an update sends
+				// the server's, so an icon picked in the UI survives a rename.
+				PlanModifiers: []planmodifier.String{keepStateWhenUnset{}},
+				Description: "Icon the UI shows beside the folder name: a Unicode emoji such as `\"🚀\"`, or an " +
+					"OpenObserve icon reference such as `\"o2:redis\"`. The server stores it as written and does " +
+					"not check it.\n\n" +
+					"Leave it unset to keep whatever icon the folder has, so one picked in the UI is not removed " +
+					"by an unrelated change. Set it to manage the icon, and a change made elsewhere then shows as " +
+					"drift. Set it to `\"\"` to remove the icon. Needs OpenObserve v1.0.0 or later: an older " +
+					"server drops the icon, which the provider reports as a warning on create and an error on " +
+					"update.",
+			},
 		},
 	}
 }
@@ -115,6 +132,7 @@ func (r *FolderResource) Create(ctx context.Context, req resource.CreateRequest,
 	created, err := r.client.CreateFolder(ctx, org, folderType, FolderAPI{
 		Name:        plan.Name.ValueString(),
 		Description: plan.Description.ValueString(),
+		Icon:        clearableString(plan.Icon),
 	})
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating folder", err.Error())
@@ -134,6 +152,23 @@ func (r *FolderResource) Create(ctx context.Context, req resource.CreateRequest,
 			return
 		}
 		folderID = found.FolderID
+		created = found
+	}
+	wanted := plan.Icon
+	plan.Icon = clearedStringToModel(plan.Icon, created.Icon)
+	// The create response may leave the icon out, so a configured one that
+	// seems missing is checked against the stored folder.
+	if iconDropped(wanted, plan.Icon) {
+		if stored, err := r.client.GetFolder(ctx, org, folderType, folderID); err == nil && stored != nil {
+			plan.Icon = clearedStringToModel(wanted, stored.Icon)
+		}
+	}
+	if iconDropped(wanted, plan.Icon) {
+		// A warning, not an error: an error on create taints the folder. State
+		// keeps the planned icon, so Terraform accepts the create, and the next
+		// refresh shows the difference.
+		plan.Icon = wanted
+		resp.Diagnostics.AddAttributeWarning(path.Root("icon"), iconDroppedSummary, iconDroppedDetail)
 	}
 
 	plan.OrgID = types.StringValue(org)
@@ -168,6 +203,7 @@ func (r *FolderResource) Read(ctx context.Context, req resource.ReadRequest, res
 	state.OrgID = types.StringValue(org)
 	state.Name = types.StringValue(folder.Name)
 	state.Description = types.StringValue(folder.Description)
+	state.Icon = clearedStringToModel(state.Icon, folder.Icon)
 	state.ID = types.StringValue(folderResourceID(org, folderType, state.FolderID.ValueString()))
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -188,10 +224,32 @@ func (r *FolderResource) Update(ctx context.Context, req resource.UpdateRequest,
 	folderType := plan.FolderType.ValueString()
 	folderID := state.FolderID.ValueString()
 
+	var config FolderResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	// The update replaces the whole folder, so an unset icon is read from the
+	// server just before the write and sent back; state may be stale.
+	icon := clearableString(plan.Icon)
+	if config.Icon.IsNull() {
+		current, err := r.client.GetFolder(ctx, org, folderType, folderID)
+		if err != nil {
+			resp.Diagnostics.AddError("Error reading folder before update",
+				"The update replaces the whole folder, so the provider reads its icon to send it back, and "+
+					"that read failed: "+err.Error())
+			return
+		}
+		if current != nil {
+			icon = current.Icon
+		}
+	}
+
 	err := r.client.UpdateFolder(ctx, org, folderType, folderID, FolderAPI{
 		FolderID:    folderID,
 		Name:        plan.Name.ValueString(),
 		Description: plan.Description.ValueString(),
+		Icon:        icon,
 	})
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating folder", err.Error())
@@ -202,6 +260,26 @@ func (r *FolderResource) Update(ctx context.Context, req resource.UpdateRequest,
 	plan.FolderID = types.StringValue(folderID)
 	plan.ID = types.StringValue(folderResourceID(org, folderType, folderID))
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+
+	// A server older than folder icons drops the field without an error.
+	if !config.Icon.IsNull() && config.Icon.ValueString() != "" {
+		if after, err := r.client.GetFolder(ctx, org, folderType, folderID); err == nil && after != nil &&
+			iconDropped(config.Icon, clearedStringToModel(config.Icon, after.Icon)) {
+			resp.Diagnostics.AddAttributeError(path.Root("icon"), iconDroppedSummary, iconDroppedDetail)
+		}
+	}
+}
+
+const iconDroppedSummary = "The server did not keep the folder icon"
+
+const iconDroppedDetail = "The folder was saved, but the server reports no icon. Folder icons need OpenObserve " +
+	"v1.0.0 or later, and older servers drop the field without an error. Upgrade the server, or remove `icon` " +
+	"from the configuration."
+
+// iconDropped reports whether a configured icon is missing from what the
+// server kept.
+func iconDropped(wanted, got types.String) bool {
+	return !wanted.IsNull() && !wanted.IsUnknown() && wanted.ValueString() != "" && !wanted.Equal(got)
 }
 
 func (r *FolderResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {

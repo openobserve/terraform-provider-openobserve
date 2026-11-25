@@ -136,7 +136,9 @@ func (r *UserResource) Create(ctx context.Context, req resource.CreateRequest, r
 	email := plan.Email.ValueString()
 
 	createErr := r.client.CreateUser(ctx, org, CreateUserAPI{
-		Email:      email,
+		// The server lowercases it too; sent lowercase so that a custom role
+		// granted with the create is recorded under the account's email.
+		Email:      strings.ToLower(email),
 		FirstName:  plan.FirstName.ValueString(),
 		LastName:   plan.LastName.ValueString(),
 		Password:   plan.Password.ValueString(),
@@ -215,8 +217,8 @@ func (r *UserResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	}
 
 	state.OrgID = types.StringValue(org)
-	state.ID = types.StringValue(userResourceID(org, user.Email))
 	r.applyUserToModel(user, &state)
+	state.ID = types.StringValue(userResourceID(org, state.Email.ValueString()))
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -231,10 +233,19 @@ func (r *UserResource) Update(ctx context.Context, req resource.UpdateRequest, r
 
 	org := requireOrg(r.client, plan.OrgID, &resp.Diagnostics)
 	customRoles := stringsFromSet(ctx, plan.CustomRoles, &resp.Diagnostics)
+	currentRoles := stringsFromSet(ctx, state.CustomRoles, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	email := plan.Email.ValueString()
+
+	// A nil list leaves the server's custom roles untouched, so removing the
+	// last role from the configuration has to send an explicit empty list.
+	// Only roles this resource granted are revoked: a user that never had
+	// `custom_roles` set keeps the grants an `openobserve_role` made.
+	if len(customRoles) == 0 && len(currentRoles) > 0 {
+		customRoles = []string{}
+	}
 
 	update := UpdateUserAPI{
 		FirstName:  optString(plan.FirstName),
@@ -309,7 +320,7 @@ func (r *UserResource) ImportState(ctx context.Context, req resource.ImportState
 	state := UserResourceModel{
 		ID:          types.StringValue(req.ID),
 		OrgID:       types.StringValue(parts[0]),
-		Email:       types.StringValue(user.Email),
+		Email:       keepEmailSpelling(types.StringValue(parts[1]), user.Email),
 		CustomRoles: types.SetNull(types.StringType),
 		Password:    types.StringNull(),
 	}
@@ -331,7 +342,7 @@ func (r *UserResource) readInto(ctx context.Context, org, email string, model *U
 }
 
 func (r *UserResource) applyUserToModel(user *UserAPI, model *UserResourceModel) {
-	model.Email = types.StringValue(user.Email)
+	model.Email = keepEmailSpelling(model.Email, user.Email)
 	model.FirstName = types.StringValue(user.FirstName)
 	model.LastName = types.StringValue(user.LastName)
 	model.IsExternal = types.BoolValue(user.IsExternal)
@@ -341,6 +352,20 @@ func (r *UserResource) applyUserToModel(user *UserAPI, model *UserResourceModel)
 	if user.Role != "" {
 		model.Role = types.StringValue(user.Role)
 	}
+}
+
+// keepEmailSpelling returns the email to store for an account the server
+// reported as stored. OpenObserve lowercases emails when it creates an account,
+// so a configured `Jane@Example.com` comes back as `jane@example.com`. Emails
+// are matched case-insensitively everywhere else in this provider, so the
+// configured spelling is kept when the two differ only by case; storing the
+// server's spelling would fail the apply with "inconsistent result after apply"
+// and plan a replacement on every run.
+func keepEmailSpelling(current types.String, stored string) types.String {
+	if !current.IsNull() && !current.IsUnknown() && equalFold(current.ValueString(), stored) {
+		return current
+	}
+	return types.StringValue(stored)
 }
 
 func userResourceID(orgID, email string) string {
